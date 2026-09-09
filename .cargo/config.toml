@@ -1,0 +1,7 @@
+# Local development override: build against the sibling db-storage working
+# tree when it is checked out next to this repo. Without this file (CI, an
+# external clone) Cargo falls back to the tagged git dependency in
+# Cargo.toml — reproducible, no local checkout required. To bump: tag+push
+# db-storage, update `tag = "..."`, delete Cargo.lock.
+[patch."https://github.com/t-rust-db/db-storage"]
+db-storage = { path = "../db-storage" }

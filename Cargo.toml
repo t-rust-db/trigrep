@@ -1,0 +1,33 @@
+[package]
+name = "trigrep"
+version = "0.1.0"
+edition = "2021"
+description = "Serverless trigram-indexed grep: one SQLite-format cache file per root, no daemon, no SQL"
+license = "MIT"
+repository = "https://github.com/t-rust-db/trigrep"
+
+[lib]
+name = "trigrep"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tg"
+path = "src/main.rs"
+
+[dependencies]
+# Storage only: the cache is a real SQLite file maintained through the
+# b-tree/pager layer. No db-core — nothing here needs a parser or a VM.
+db-storage = { version = "0.6.3", git = "https://github.com/t-rust-db/db-storage", tag = "v0.6.3", default-features = false, features = ["row"] }
+# The regex engine plus its HIR (required-literal extraction narrows the
+# candidate set), and the XDG cache-dir lookup. Ordinary app dependencies:
+# this is a binary, not a library (sqlite-rs ADR-0040 does not apply).
+regex = "1"
+regex-syntax = "0.8"
+dirs = "5"
+
+[dev-dependencies]
+db-storage = { version = "0.6.3", git = "https://github.com/t-rust-db/db-storage", tag = "v0.6.3", default-features = false, features = ["row", "test-support"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
