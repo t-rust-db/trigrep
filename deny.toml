@@ -13,7 +13,7 @@ ignore = []
 [licenses]
 # trigrep is Apache-2.0. MIT/Unlicense arrive via regex's family and
 # db-storage's ruzstd/twox-hash; MPL-2.0 only via option-ext (dirs-sys).
-allow = ["Apache-2.0", "MIT", "Unlicense", "MPL-2.0"]
+allow = ["Apache-2.0", "MIT", "Unlicense", "MPL-2.0", "Unicode-3.0"]
 confidence-threshold = 0.8
 
 [bans]
@@ -24,4 +24,4 @@ wildcards = "deny"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = ["https://github.com/t-rust-db/db-storage", "https://github.com/t-rust-db/db-core"]
+allow-git = ["https://github.com/t-rust-db/db-storage"]
