@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build release test test-lib test-cli lint fmt install version clean check-panic-allows check-deny check-mvl-limit mcdc-obligations test-mcdc coverage check-coverage ci
+.PHONY: help build release smoke test test-lib test-cli lint fmt install version clean check-panic-allows check-deny check-mvl-limit mcdc-obligations test-mcdc coverage check-coverage ci
 
 help: ## Show this help
 	@echo ""
@@ -24,6 +24,12 @@ install: ## cargo install into ~/.cargo/bin as `tg`
 	cargo install --path . --locked
 
 # === Test ===
+
+smoke: ## Build the `tg` binary and run --help / --version (must exit 0)
+	cargo build --bin tg
+	@./target/debug/tg --help >/dev/null
+	@./target/debug/tg --version
+	@echo "smoke: ok"
 
 test: ## Full test suite (unit + CLI + crash-recovery)
 	cargo test
@@ -107,6 +113,7 @@ check-coverage: coverage ## Gate: fail if line coverage is below $(COVERAGE_MIN)
 
 ci: ## Every CI gate locally, same order as .github/workflows/ci.yml
 	$(MAKE) lint
+	$(MAKE) smoke
 	$(MAKE) check-deny
 	$(MAKE) check-mvl-limit
 	$(MAKE) test
