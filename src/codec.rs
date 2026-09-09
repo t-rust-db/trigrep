@@ -44,23 +44,28 @@ pub fn unique_trigrams(bytes: &[u8]) -> Vec<i64> {
         return out;
     }
     let mut bits = vec![0u64; (1usize << 24) / 64];
-    let mut count = 0usize;
     for w in bytes.windows(3) {
-        let t = (usize::from(w[0]) << 16) | (usize::from(w[1]) << 8) | usize::from(w[2]);
-        let (word, bit) = (t / 64, t % 64);
-        let mask = 1u64 << bit;
-        if bits[word] & mask == 0 {
-            bits[word] |= mask;
-            count += 1;
+        let Some(&[a, b, c]) = w.first_chunk::<3>() else {
+            continue;
+        };
+        let t = pack([a, b, c]);
+        let idx = usize::try_from(t).unwrap_or(0);
+        let (word, bit) = (idx / 64, idx % 64);
+        if let Some(slot) = bits.get_mut(word) {
+            *slot |= 1u64.wrapping_shl(u32::try_from(bit).unwrap_or(0));
         }
     }
-    let mut out = Vec::with_capacity(count);
+    let mut out = Vec::new();
     for (wi, &word) in bits.iter().enumerate() {
         let mut w = word;
         while w != 0 {
-            let bit = w.trailing_zeros() as usize;
-            out.push(((wi * 64) + bit) as i64);
-            w &= w - 1;
+            let bit = w.trailing_zeros();
+            let t = i64::try_from(wi)
+                .unwrap_or(0)
+                .wrapping_mul(64)
+                .wrapping_add(i64::from(bit));
+            out.push(t);
+            w &= w.wrapping_sub(1);
         }
     }
     out
@@ -111,7 +116,7 @@ pub fn encode_postings(ids: &[i64]) -> Vec<u8> {
     let mut prev: i64 = 0;
     for &id in ids {
         let gap = id.wrapping_sub(prev);
-        push_leb128(&mut out, gap as u64);
+        push_leb128(&mut out, gap.cast_unsigned());
         prev = id;
     }
     out
@@ -205,7 +210,7 @@ mod tests {
         /// #14: decoding arbitrary bytes never panics — it returns Ok or a CodecError.
         #[test]
         fn decode_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
-            let _ = super::decode_postings(&bytes);
+            drop(super::decode_postings(&bytes));
         }
 
         /// #14: the two unique_trigrams strategies agree on both sides of the

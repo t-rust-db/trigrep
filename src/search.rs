@@ -175,13 +175,13 @@ impl Output {
             if m.start() < at {
                 continue; // find_iter yields non-overlapping matches; guard anyway
             }
-            out.write_all(&line[at..m.start()])?;
+            out.write_all(line.get(at..m.start()).unwrap_or(&[]))?;
             if m.end() > m.start() {
-                self.paint(out, SGR_MATCH, &line[m.start()..m.end()])?;
+                self.paint(out, SGR_MATCH, line.get(m.start()..m.end()).unwrap_or(&[]))?;
             }
             at = m.end();
         }
-        out.write_all(&line[at..])
+        out.write_all(line.get(at..).unwrap_or(&[]))
     }
 }
 
@@ -223,11 +223,7 @@ pub fn run(cache: &Cache, q: &Query<'_>, o: &Output, out: &mut impl Write) -> Re
         // last line (#11). A file without a trailing newline keeps its
         // real last line.
         let body = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
-        let lines = if body.is_empty() && bytes.is_empty() {
-            &bytes[..0]
-        } else {
-            body
-        };
+        let lines = body;
         for (n, line) in lines.split(|&b| b == b'\n').enumerate() {
             if lines.is_empty() {
                 break;
@@ -380,10 +376,10 @@ mod tests {
     use super::*;
 
     fn lits(p: &str) -> Vec<Vec<u8>> {
-        required_literals(&regex_syntax::Parser::new().parse(p).unwrap_or_else(|e| {
-            // Test-only: a bad pattern is a bug in the test itself.
-            unreachable!("{e}")
-        }))
+        // Test-only helper; a bad pattern here is a bug in the test itself.
+        #[allow(clippy::unwrap_used)]
+        let hir = regex_syntax::Parser::new().parse(p).unwrap();
+        required_literals(&hir)
     }
 
     #[test]

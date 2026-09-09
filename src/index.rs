@@ -150,7 +150,7 @@ fn encode_postings_row(ids: &[i64], cache: &Cache) -> Vec<u8> {
 /// yield millions of distinct trigrams per file — the build's real peak
 /// memory, and a lot of useless index.
 pub fn is_binary(bytes: &[u8]) -> bool {
-    let head = &bytes[..bytes.len().min(8192)];
+    let head = bytes.get(..bytes.len().min(8192)).unwrap_or(bytes);
     if head.contains(&0) {
         return true;
     }
@@ -158,7 +158,7 @@ pub fn is_binary(bytes: &[u8]) -> bool {
         .iter()
         .filter(|&&b| b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r' || b == 0x7f)
         .count();
-    control * 20 > head.len()
+    control.saturating_mul(20) > head.len()
 }
 
 /// Extension check, the other half of tgrep's rule: formats that are
@@ -342,7 +342,7 @@ fn scan_one(root: &Path, entry: crate::walk::Entry, old: Option<&FileMeta>) -> S
     let Some(bytes) = read_indexable(&full, meta.len()) else {
         return Scanned { rel, body: None };
     };
-    let hash = fnv1a64(&bytes) as i64;
+    let hash = fnv1a64(&bytes).cast_signed();
     let trigrams = match old {
         Some(old) if old.hash == hash => None, // touched, same content
         _ => Some(codec::unique_trigrams(&bytes)),
@@ -507,7 +507,7 @@ pub fn update(cache: &mut Cache, root: &Path) -> Result<Stats> {
                 (false, _) => stats.added = stats.added.saturating_add(1),
             }
             if let Some(ts) = trigrams {
-                pending_bytes = pending_bytes.saturating_add(ts.len() * 8);
+                pending_bytes = pending_bytes.saturating_add(ts.len().saturating_mul(8));
                 for t in ts {
                     pending.entry(t).or_default().push(id);
                 }
@@ -615,20 +615,22 @@ fn scan_window(
                 if i >= n {
                     break;
                 }
-                let entry = slots[i].lock().unwrap_or_else(|e| e.into_inner()).take();
+                let entry = slots.get(i).and_then(|m| {
+                    m.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                });
                 let Some(entry) = entry else { continue };
                 let old = existing.get(entry.rel.as_str());
                 let r = scan_one(root, entry, old);
-                *out[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                if let Some(slot) = out.get(i) {
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                }
             });
         }
     });
     out.into_iter()
-        .map(|m| {
-            m.into_inner()
-                .unwrap_or_else(|e| e.into_inner())
-                .expect("every slot is filled once its index was claimed")
-        })
+        .filter_map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
         .collect()
 }
 
