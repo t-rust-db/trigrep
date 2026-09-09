@@ -262,3 +262,54 @@ plain output byte for byte.
 - THEN output equals the plain output; `--color` with `NO_COLOR=1` is still coloured
 
 **Tests:** `tests/cli.rs::output_layout_and_color_flags`, `src/search.rs::tests::output_resolution_follows_the_pipe_convention`, `src/search.rs::tests::every_match_span_is_highlighted`
+
+### Requirement 9: A mismatched stored root triggers a rebuild [MUST]
+
+On every non-fresh open, the cache's stored root (written at bootstrap)
+MUST be compared to the canonicalized root it is being opened for. A
+mismatch MUST trigger a rebuild rather than searching or updating the
+cache as though it belonged to the requested root.
+
+**Implementation:** `src/cache.rs::read_stored_root`, `src/cache.rs::open`
+
+#### Scenario: A copied cache directory does not leak into the wrong search
+
+- GIVEN a cache built for root A, copied to the cache path root B would use
+- WHEN B is searched
+- THEN the cache is rebuilt from B's own tree and B's results are returned, never A's
+
+**Tests:** `tests/cli.rs::mismatched_stored_root_triggers_a_rebuild_not_wrong_answers`
+
+### Requirement 10: An unreadable directory or entry is skipped, not fatal [MUST]
+
+A subdirectory or entry that cannot be read (permission denied, vanished
+mid-walk) MUST be skipped and counted, not abort the whole index run. The
+root itself failing to open MUST remain a hard error.
+
+**Implementation:** `src/walk.rs::walk_dir`, `src/walk.rs::list_files`
+
+#### Scenario: One locked-down subdirectory does not take the run down with it
+
+- GIVEN a tree with one subdirectory made unreadable
+- WHEN the tree is indexed
+- THEN the run succeeds, reports the skip count, and every readable file is still indexed
+
+**Tests:** `tests/cli.rs::unreadable_subdirectory_is_skipped_not_fatal`
+
+### Requirement 11: Concurrent first-time indexers do not corrupt the cache [MUST]
+
+Two or more `tg` processes racing the first-ever index of a root MUST NOT
+corrupt the cache file or fail with an error a caller cannot recover from
+by retrying. The bootstrap's initial write MUST be guarded against a
+create/write race; the CLI MUST retry, bounded, on the transient errors a
+losing bootstrap attempt can produce.
+
+**Implementation:** `src/cache.rs::open` (exclusive-lock guard), `src/main.rs::retry_locked`
+
+#### Scenario: Six processes racing one root's first index all succeed
+
+- GIVEN an unindexed root and six `tg index` invocations launched at once
+- WHEN all six run to completion
+- THEN every process exits 0, the resulting cache passes an integrity check, and it is fully searchable
+
+**Tests:** `tests/cli.rs::concurrent_first_index_does_not_corrupt_the_cache`

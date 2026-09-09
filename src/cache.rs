@@ -117,16 +117,41 @@ pub fn open(root: &Path, rebuild: bool) -> Result<(Cache, bool)> {
         journal.push("-journal");
         remove_if_exists(Path::new(&journal))?;
     }
-    // Absent, or present but empty (SQLite's own rule: a zero-byte file is
-    // a valid empty database, #14): write the empty page-1 image so the
-    // pager has a header to open.
-    let empty = std::fs::metadata(&path)
-        .map(|m| m.len() == 0)
-        .unwrap_or(true);
-    if empty {
+    // Absent, or present but empty (SQLite's own rule: a zero-byte file
+    // is a valid empty database, #14): write the empty page-1 image so
+    // the pager has a header to open. Guarded by an exclusive lock,
+    // re-checked once held (#15): two `tg` processes racing the very
+    // first index of a root both reach this line with the file absent
+    // or empty; without the lock they can both create/write it and one
+    // process's page-1 write can land after the other's, torn. The lock
+    // is released before `open_db` takes the pager's own (fresh, shared)
+    // lock on a *different* file handle, so there is no self-deadlock —
+    // flock is per open-file-description, not per path.
+    {
         let file = UnixVfs.create_or_open_write(&path)?;
-        file.write_at(&DatabaseHeader::new_empty_page1(DEFAULT_PAGE_SIZE), 0)?;
-        file.sync()?;
+        let mut lock = file.lock_shared()?;
+        // The exclusive escalation is non-blocking (matching SQLite's own
+        // `os_unix.c`: `F_SETLK`, not `F_SETLKW`) — a losing racer gets
+        // `VfsError::Locked` immediately, not a wait. Retry with a short
+        // backoff, SQLite's own busy-handler convention, rather than
+        // surface a spurious "database is locked" for what is really
+        // "someone else is two milliseconds into writing eight bytes".
+        let mut attempt: u32 = 0;
+        loop {
+            match lock.escalate_to_exclusive() {
+                Ok(()) => break,
+                Err(_) if attempt < 200 => {
+                    attempt = attempt.saturating_add(1);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if file.size()? == 0 {
+            file.write_at(&DatabaseHeader::new_empty_page1(DEFAULT_PAGE_SIZE), 0)?;
+            file.sync()?;
+        }
+        lock.de_escalate_to_shared()?;
     }
 
     let (header, mut pager) = open_db(&UnixVfs, &path)?;
@@ -145,6 +170,19 @@ pub fn open(root: &Path, rebuild: bool) -> Result<(Cache, bool)> {
         // cache as needing its first scan, never search it as it stands.
         let mut cur = TableCursor::new(&pager, &header, meta_root);
         fresh = cur.seek_row(META_INCOMPLETE_ROWID)?.is_some();
+
+        // #15: the cache is addressed by a 64-bit hash of the root path,
+        // and a copied cache directory (or, astronomically unlikely, a
+        // real collision) would otherwise silently serve one tree's
+        // index for another's search — wrong results, no error. The
+        // `meta` row written at bootstrap names the root it was built
+        // for; verify it, and rebuild rather than trust a mismatch.
+        if let Some(stored) = read_stored_root(&pager, &header, meta_root)? {
+            if stored != root.to_string_lossy() {
+                drop(pager);
+                return open(root, true);
+            }
+        }
     }
     Ok((
         Cache {
@@ -157,6 +195,24 @@ pub fn open(root: &Path, rebuild: bool) -> Result<(Cache, bool)> {
         },
         fresh,
     ))
+}
+
+/// The root path stored in `meta` at bootstrap (rowid 1), or `None` if
+/// that row is somehow absent (a cache this old code never wrote).
+fn read_stored_root(
+    pager: &Pager,
+    header: &DatabaseHeader,
+    meta_root: u32,
+) -> Result<Option<String>> {
+    let mut cursor = TableCursor::new(pager, header, meta_root);
+    let Some(row) = cursor.seek_row(1)? else {
+        return Ok(None);
+    };
+    let record = db_storage::row::record::decode_record(&row.payload, header.text_encoding)?;
+    match record.get(1) {
+        Some(db_storage::row::record::Value::Text(t)) => Ok(Some(t.to_string())),
+        _ => Ok(None),
+    }
 }
 
 fn remove_if_exists(path: &Path) -> Result<()> {

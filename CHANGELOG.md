@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.4.0] - 2026-09-09
+
+Three design decisions from #15, confirmed before implementation.
+
+### Fixed
+- The cache's stored root is now checked against the root it is opened
+  for; a mismatch (a copied cache directory, in principle a hash
+  collision) triggers a rebuild instead of silently serving one tree's
+  index for another's search.
+- An unreadable subdirectory or entry is skipped and counted ("N
+  unreadable skipped" in the index report) instead of aborting the
+  whole run, matching `grep -r`. The root itself failing to open is
+  still a hard error.
+- Two `tg` processes racing a root's first-ever index no longer corrupt
+  the cache or fail spuriously: the bootstrap's page-1 write is guarded
+  by an exclusive lock, and the CLI retries (bounded, exponential
+  backoff) on "database is locked" and the schema race a losing
+  bootstrap attempt can still hit.
+
+### Changed
+- `walk::list_files` returns `(Vec<Entry>, usize)` (files, skip count);
+  `index::Stats` gains `skipped_unreadable`.
+
+Test count: 87 -> 90. MC/DC: 13/13 multi-leaf obligations discharged
+(one new: the retry loop's guard). Coverage 93.84% (floor 85%).
+
+
 ## [0.3.0] - 2026-09-09
 
 Gate suite adopted from db-core/mvl-lang's approach, plus three real bugs

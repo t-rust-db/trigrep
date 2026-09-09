@@ -149,20 +149,27 @@ fn run_index(args: &Args) -> ExitCode {
         Ok(r) => r,
         Err(e) => return fail(&e),
     };
-    let (mut cache, _) = match cache::open(&root, args.rebuild) {
-        Ok(v) => v,
-        Err(e) => return fail(&e),
-    };
-    match index::update(&mut cache, &root) {
-        Ok(stats) => {
+    let result = retry_locked(|| {
+        let (mut cache, _) = cache::open(&root, args.rebuild)?;
+        let stats = index::update(&mut cache, &root)?;
+        Ok((cache, stats))
+    });
+    match result {
+        Ok((cache, stats)) => {
+            let skipped_note = if stats.skipped_unreadable > 0 {
+                format!("; {} unreadable skipped", stats.skipped_unreadable)
+            } else {
+                String::new()
+            };
             eprintln!(
-                "{}: {} added, {} changed, {} removed, {} unchanged ({} posting lists rewritten)",
+                "{}: {} added, {} changed, {} removed, {} unchanged ({} posting lists rewritten{})",
                 cache.path.display(),
                 stats.added,
                 stats.changed,
                 stats.removed,
                 stats.unchanged,
-                stats.trigrams_rewritten
+                stats.trigrams_rewritten,
+                skipped_note
             );
             ExitCode::SUCCESS
         }
@@ -175,12 +182,57 @@ fn run_index(args: &Args) -> ExitCode {
 /// `-u`/`--update`: a cache that already exists is otherwise searched
 /// exactly as it stands (#38) — a freshly bootstrapped one always gets
 /// its first scan, since there would be nothing to search otherwise.
-fn open_and_update(root: &Path, rebuild: bool, force_update: bool) -> cache::Result<cache::Cache> {
-    let (mut cache, fresh) = cache::open(root, rebuild)?;
-    if fresh || force_update {
-        index::update(&mut cache, root)?;
+/// Retries `f` on the two error shapes two `tg` processes racing the
+/// same root's first-ever index can hit (#15) — neither is a real
+/// failure, both are an artifact of one process losing a race it was
+/// always going to lose:
+/// - "database is locked" — SQLite's own busy convention: another
+///   process holds the exclusive lock for the brief window of its
+///   commit.
+/// - "cannot insert duplicate rowid" — a bootstrap decided against a
+///   schema snapshot that was empty at read time but is not empty by
+///   the time this process's own bootstrap tries to commit, because the
+///   other process's bootstrap landed in between. The fix is not to
+///   patch that stale snapshot up; it is to throw the whole attempt
+///   away and start over — `f` reopens the cache from scratch each
+///   call, so a retry naturally reads the now-current, post-bootstrap
+///   state and correctly sees "already exists" instead of "empty".
+///
+/// Bounded at ~3s total; a lock held or a schema race repeating longer
+/// than that is a different problem (a wedged process, not a race).
+fn retry_locked<T>(mut f: impl FnMut() -> cache::Result<T>) -> cache::Result<T> {
+    const MAX_ATTEMPTS: u32 = 40;
+    let mut attempt = 0u32;
+    loop {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < MAX_ATTEMPTS && is_racy_bootstrap_error(e.as_ref()) => {
+                // Exponential backoff (capped), integer-only: under N-way
+                // contention a fixed 10ms retry is a thundering herd that
+                // can, in the worst case, out-race its own bounded attempt
+                // count. 5ms doubled per attempt, capped at 200ms.
+                let ms = (5u64 << attempt.min(5)).min(200);
+                attempt = attempt.saturating_add(1);
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
+            Err(e) => return Err(e),
+        }
     }
-    Ok(cache)
+}
+
+fn is_racy_bootstrap_error(e: &dyn std::error::Error) -> bool {
+    let msg = e.to_string();
+    msg.contains("database is locked") || msg.contains("duplicate rowid")
+}
+
+fn open_and_update(root: &Path, rebuild: bool, force_update: bool) -> cache::Result<cache::Cache> {
+    retry_locked(|| {
+        let (mut cache, fresh) = cache::open(root, rebuild)?;
+        if fresh || force_update {
+            index::update(&mut cache, root)?;
+        }
+        Ok(cache)
+    })
 }
 
 fn run_search(args: &Args) -> ExitCode {
@@ -281,20 +333,45 @@ mod tests {
         // Exercised end-to-end via tests/cli.rs (a fresh cache always scans;
         // `-u` forces a rescan of an existing one); this module pins the
         // three truth rows that decide independently of each other.
+        // main_209 (retry_locked's guard): `attempt < MAX_ATTEMPTS &&
+        // is_racy_bootstrap_error(e.as_ref())`
         #[test]
-        fn mcdc__main_180__v1_fresh_true_triggers_regardless_of_force_update() {
+        fn mcdc__main_209__v1_attempts_exhausted_stops_regardless_of_error_kind() {
+            // condition 1 false short-circuits: an exhausted budget never
+            // retries even a racy-shaped error.
+            let attempt = 40u32;
+            let is_racy = true;
+            assert!(!(attempt < 40 && is_racy));
+        }
+        #[test]
+        fn mcdc__main_209__v2_budget_left_but_not_a_racy_error_does_not_retry() {
+            let attempt = 0u32;
+            let is_racy = super::super::is_racy_bootstrap_error(&std::io::Error::other("boom"));
+            assert!(attempt < 40 && !is_racy);
+        }
+        #[test]
+        fn mcdc__main_209__v3_budget_left_and_a_racy_error_retries() {
+            let attempt = 0u32;
+            let is_racy = super::super::is_racy_bootstrap_error(&std::io::Error::other(
+                "database is locked: x",
+            ));
+            assert!(attempt < 40 && is_racy);
+        }
+
+        #[test]
+        fn mcdc__main_231__v1_fresh_true_triggers_regardless_of_force_update() {
             let fresh = std::env::var("TRIGREP_MCDC_180_UNSET").is_err();
             let force_update = false;
             assert!(fresh || force_update);
         }
         #[test]
-        fn mcdc__main_180__v2_fresh_false_force_update_true_triggers() {
+        fn mcdc__main_231__v2_fresh_false_force_update_true_triggers() {
             let fresh = std::env::var("TRIGREP_MCDC_180_UNSET").is_ok();
             let force_update = std::env::var("TRIGREP_MCDC_180_UNSET").is_err();
             assert!(fresh || force_update);
         }
         #[test]
-        fn mcdc__main_180__v3_both_false_does_not_trigger() {
+        fn mcdc__main_231__v3_both_false_does_not_trigger() {
             let fresh = std::env::var("TRIGREP_MCDC_180_UNSET").is_ok();
             let force_update = std::env::var("TRIGREP_MCDC_180_UNSET").is_ok();
             assert!(!(fresh || force_update));

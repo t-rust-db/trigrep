@@ -723,3 +723,87 @@ fn foreign_zero_byte_and_garbage_cache_files() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// #15: a cache whose stored root does not match the root it is being
+/// asked about is rebuilt from scratch rather than trusted — a copied
+/// cache directory (or, in principle, a hash collision) must never
+/// silently serve one tree's index for another's search.
+#[test]
+fn mismatched_stored_root_triggers_a_rebuild_not_wrong_answers() {
+    let a = scratch("root-a");
+    a.write("f.txt", "needle_a\n");
+    assert!(a.run(&["index"]).status.success());
+    let b = scratch("root-b");
+    b.write("f.txt", "needle_b\n");
+    // Copy a's cache file to b's cache path: same bytes, wrong root.
+    let a_cache = a.cache_path();
+    std::fs::create_dir_all(&b.cache_dir).unwrap();
+    let b_cache_name = b.cache_dir.join(a_cache.file_name().unwrap());
+    // b's own cache-path depends on b's root hash, not a's file name;
+    // find it by asking b directly, then plant a's bytes there.
+    let real_b_cache = b.cache_path();
+    std::fs::copy(&a_cache, &real_b_cache).unwrap();
+    let _ = b_cache_name;
+    // Searching b must find b's content, not a's — proving the mismatch
+    // was detected and the cache rebuilt rather than trusted as-is.
+    let (code, out) = b.search("needle_b");
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("f.txt:1:needle_b"), "{out}");
+    let (code, _) = b.search("needle_a");
+    assert_eq!(code, 1, "a's content must not leak into b's search results");
+}
+
+/// #15: one unreadable subdirectory is skipped, not fatal to the run.
+#[test]
+#[cfg(unix)]
+fn unreadable_subdirectory_is_skipped_not_fatal() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = scratch("unreadable-dir");
+    s.write("ok/a.txt", "needle_ok\n");
+    s.write("locked/b.txt", "needle_locked\n");
+    let locked = s.root.join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let out = s.run(&["index"]);
+    // restore permissions before any assertion can early-return and leak
+    // an unreadable directory into the test's own cleanup
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unreadable skipped"), "{stderr}");
+    let (code, found) = s.search("needle_ok");
+    assert_eq!(code, 0, "{found}");
+    assert!(found.contains("ok/a.txt:1:needle_ok"));
+}
+
+/// #15: two `tg` processes racing the very first index of a root do not
+/// corrupt the cache — one wins the bootstrap, the other proceeds on the
+/// result, and both end with a searchable, integrity-checked cache.
+#[test]
+fn concurrent_first_index_does_not_corrupt_the_cache() {
+    let s = scratch("race");
+    for i in 0..50u32 {
+        s.write(&format!("f{i}.txt"), &format!("needle {i}\n"));
+    }
+    let spawn = || {
+        Command::new(SQLGREP)
+            .env("TRIGREP_CACHE_DIR", &s.cache_dir)
+            .arg("index")
+            .arg(&s.root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut children: Vec<_> = (0..6).map(|_| spawn()).collect();
+    for c in &mut children {
+        assert!(c.wait().unwrap().success());
+    }
+    assert_cache_healthy(&s.cache_path());
+    let (code, out) = s.search("needle 7");
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("f7.txt:1:needle 7"));
+}

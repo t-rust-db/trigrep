@@ -46,6 +46,10 @@ pub struct Stats {
     pub removed: usize,
     pub unchanged: usize,
     pub trigrams_rewritten: usize,
+    /// Subdirectories or entries skipped because they could not be read
+    /// (#15) — permission denied, vanished mid-walk, and similar. Zero on
+    /// a git-listed tree (git itself decides what exists).
+    pub skipped_unreadable: usize,
 }
 
 fn text(v: Option<&Value>) -> String {
@@ -455,7 +459,8 @@ pub fn update(cache: &mut Cache, root: &Path) -> Result<Stats> {
     let mut seen: HashMap<String, ()> = HashMap::new();
     let mut first = true;
 
-    let present = crate::walk::list_files(root)?;
+    let (present, skipped_unreadable) = crate::walk::list_files(root)?;
+    stats.skipped_unreadable = skipped_unreadable;
     let mut window: Vec<crate::walk::Entry> = Vec::with_capacity(chunk_files);
     let mut iter = present.into_iter().peekable();
     while iter.peek().is_some() {
@@ -650,9 +655,9 @@ mod tests {
         use super::super::{is_binary_name, FileMeta};
         use std::path::Path;
 
-        // index_268: `size > MAX_FILE_SIZE || is_binary_name(path)`
+        // index_272: `size > MAX_FILE_SIZE || is_binary_name(path)`
         #[test]
-        fn mcdc__index_268__v1_neither_condition_reads_the_file() {
+        fn mcdc__index_272__v1_neither_condition_reads_the_file() {
             let dir = std::env::temp_dir().join(format!("trigrep-mcdc-268-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let f = dir.join("a.txt");
@@ -661,14 +666,14 @@ mod tests {
         }
 
         #[test]
-        fn mcdc__index_268__v2_too_large_alone_skips() {
+        fn mcdc__index_272__v2_too_large_alone_skips() {
             assert!(
                 super::super::read_indexable(Path::new("/nonexistent.txt"), u64::MAX).is_none()
             );
         }
 
         #[test]
-        fn mcdc__index_268__v3_binary_name_alone_skips_even_if_small() {
+        fn mcdc__index_272__v3_binary_name_alone_skips_even_if_small() {
             // is_binary_name true, size condition false (0 <= MAX): isolates
             // condition 2's effect from condition 1.
             assert!(is_binary_name(Path::new("a.pdf")));
@@ -687,7 +692,7 @@ mod tests {
             }
         }
         #[test]
-        fn mcdc__index_334__v1_mtime_zero_forces_a_content_read_even_if_size_matches() {
+        fn mcdc__index_338__v1_mtime_zero_forces_a_content_read_even_if_size_matches() {
             // condition 1 false short-circuits regardless of 2/3.
             let old = FileMeta {
                 mtime: 0,
@@ -697,20 +702,20 @@ mod tests {
             assert_ne!(old.mtime, 100); // mtime 0 never equals a real stat mtime
         }
         #[test]
-        fn mcdc__index_334__v2_mtime_matches_but_size_differs_is_not_unchanged() {
+        fn mcdc__index_338__v2_mtime_matches_but_size_differs_is_not_unchanged() {
             let old = old_meta();
             let (mtime, size) = (old.mtime, old.size + 1);
             assert!(mtime != 0 && old.mtime == mtime);
             assert!(old.size != size); // condition 3 false: not "unchanged by stat"
         }
         #[test]
-        fn mcdc__index_334__v3_all_three_true_is_unchanged() {
+        fn mcdc__index_338__v3_all_three_true_is_unchanged() {
             let old = old_meta();
             let (mtime, size) = (old.mtime, old.size);
             assert!(mtime != 0 && old.mtime == mtime && old.size == size);
         }
         #[test]
-        fn mcdc__index_334__v4_mtime_nonzero_and_mtime_matches_but_size_differs_alone() {
+        fn mcdc__index_338__v4_mtime_nonzero_and_mtime_matches_but_size_differs_alone() {
             // Isolates condition 3 (size) with conditions 1,2 held true —
             // distinct from v2, which held condition 1 true but did not
             // pin condition 2 independently of condition 3.
@@ -723,7 +728,7 @@ mod tests {
         // index_483: same three-condition shape as index_334, in the
         // sequential post-scan pass — a separate obligation, its own vectors.
         #[test]
-        fn mcdc__index_483__v1_mtime_zero_forces_a_content_read_even_if_size_matches() {
+        fn mcdc__index_488__v1_mtime_zero_forces_a_content_read_even_if_size_matches() {
             let old = FileMeta {
                 mtime: 0,
                 ..old_meta()
@@ -732,20 +737,20 @@ mod tests {
             assert_ne!(old.mtime, 100);
         }
         #[test]
-        fn mcdc__index_483__v2_mtime_matches_but_size_differs_is_not_unchanged() {
+        fn mcdc__index_488__v2_mtime_matches_but_size_differs_is_not_unchanged() {
             let old = old_meta();
             let (mtime, size) = (old.mtime, old.size + 1);
             assert!(mtime != 0 && old.mtime == mtime);
             assert!(old.size != size);
         }
         #[test]
-        fn mcdc__index_483__v3_all_three_true_is_unchanged() {
+        fn mcdc__index_488__v3_all_three_true_is_unchanged() {
             let old = old_meta();
             let (mtime, size) = (old.mtime, old.size);
             assert!(mtime != 0 && old.mtime == mtime && old.size == size);
         }
         #[test]
-        fn mcdc__index_483__v4_mtime_nonzero_and_mtime_matches_but_size_differs_alone() {
+        fn mcdc__index_488__v4_mtime_nonzero_and_mtime_matches_but_size_differs_alone() {
             let old = old_meta();
             let (mtime, size) = (old.mtime, old.size.wrapping_add(1));
             assert!(mtime != 0 && old.mtime == mtime);
@@ -754,11 +759,11 @@ mod tests {
 
         // index_366: `file_rows.is_empty() && !last && !*first`
         #[test]
-        fn mcdc__index_366__v1_nonempty_file_rows_never_clears_pending() {
+        fn mcdc__index_370__v1_nonempty_file_rows_never_clears_pending() {
             assert!(!vec![(None::<i64>, None::<FileMeta>)].is_empty());
         }
         #[test]
-        fn mcdc__index_366__v2_empty_but_last_does_not_take_the_early_return() {
+        fn mcdc__index_370__v2_empty_but_last_does_not_take_the_early_return() {
             let (empty, last) = (
                 Vec::<(Option<i64>, Option<FileMeta>)>::new().is_empty(),
                 true,
@@ -766,12 +771,12 @@ mod tests {
             assert!(empty && last); // last=true makes `!last` false
         }
         #[test]
-        fn mcdc__index_366__v3_empty_not_last_but_first_does_not_take_the_early_return() {
+        fn mcdc__index_370__v3_empty_not_last_but_first_does_not_take_the_early_return() {
             let (empty, last, first) = (true, false, true);
             assert!(empty && !last && first); // first=true makes `!*first` false
         }
         #[test]
-        fn mcdc__index_366__v4_empty_not_last_not_first_takes_the_early_return() {
+        fn mcdc__index_370__v4_empty_not_last_not_first_takes_the_early_return() {
             let (empty, last, first) = (true, false, false);
             assert!(empty && !last && !first);
         }
@@ -780,27 +785,27 @@ mod tests {
         // runtime-read default (not a literal, so clippy can't fold it away)
         // and confirm it alone is enough to make the OR true.
         #[test]
-        fn mcdc__index_515__v1_file_count_alone_triggers() {
+        fn mcdc__index_520__v1_file_count_alone_triggers() {
             let chunk_files = super::super::env_usize("TRIGREP_CHUNK_FILES_MCDC_UNSET_1", 4000);
             let (rows, bytes, trigrams) = (chunk_files, 0usize, 0usize);
             assert!(rows >= chunk_files || bytes >= (256usize << 20) || trigrams >= 1_000_000);
         }
         #[test]
-        fn mcdc__index_515__v2_bytes_alone_triggers() {
+        fn mcdc__index_520__v2_bytes_alone_triggers() {
             let chunk_bytes =
                 super::super::env_usize("TRIGREP_CHUNK_BYTES_MCDC_UNSET_1", 256 << 20);
             let (rows, bytes, trigrams) = (0usize, chunk_bytes, 0usize);
             assert!(rows >= 4000 || bytes >= chunk_bytes || trigrams >= 1_000_000);
         }
         #[test]
-        fn mcdc__index_515__v3_trigrams_alone_triggers() {
+        fn mcdc__index_520__v3_trigrams_alone_triggers() {
             let chunk_trigrams =
                 super::super::env_usize("TRIGREP_CHUNK_TRIGRAMS_MCDC_UNSET_1", 1_000_000);
             let (rows, bytes, trigrams) = (0usize, 0usize, chunk_trigrams);
             assert!(rows >= 4000 || bytes >= (256usize << 20) || trigrams >= chunk_trigrams);
         }
         #[test]
-        fn mcdc__index_515__v4_none_below_threshold_does_not_trigger() {
+        fn mcdc__index_520__v4_none_below_threshold_does_not_trigger() {
             let chunk_files = super::super::env_usize("TRIGREP_CHUNK_FILES_MCDC_UNSET_2", 4000);
             let (rows, bytes, trigrams) = (0usize, 0usize, 0usize);
             assert!(!(rows >= chunk_files || bytes >= (256usize << 20) || trigrams >= 1_000_000));
@@ -808,16 +813,16 @@ mod tests {
 
         // index_537: `file_rows.is_empty() && first`
         #[test]
-        fn mcdc__index_537__v1_nonempty_never_triggers_the_marker_clear() {
+        fn mcdc__index_542__v1_nonempty_never_triggers_the_marker_clear() {
             assert!(!vec![(None::<i64>, None::<FileMeta>)].is_empty());
         }
         #[test]
-        fn mcdc__index_537__v2_empty_but_not_first_does_not_trigger() {
+        fn mcdc__index_542__v2_empty_but_not_first_does_not_trigger() {
             let (empty, first) = (true, false);
             assert!(!(empty && first));
         }
         #[test]
-        fn mcdc__index_537__v3_empty_and_first_triggers() {
+        fn mcdc__index_542__v3_empty_and_first_triggers() {
             let (empty, first) = (true, true);
             assert!(empty && first);
         }
