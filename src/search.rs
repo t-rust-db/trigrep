@@ -218,7 +218,20 @@ pub fn run(cache: &Cache, q: &Query<'_>, o: &Output, out: &mut impl Write) -> Re
             .display()
             .to_string();
         let mut heading_written = false;
-        for (n, line) in bytes.split(|&b| b == b'\n').enumerate() {
+        // A file ending in '\n' splits into a trailing empty segment that
+        // is not a line; without this, `^` or `x*` reported a phantom
+        // last line (#11). A file without a trailing newline keeps its
+        // real last line.
+        let body = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+        let lines = if body.is_empty() && bytes.is_empty() {
+            &bytes[..0]
+        } else {
+            body
+        };
+        for (n, line) in lines.split(|&b| b == b'\n').enumerate() {
+            if lines.is_empty() {
+                break;
+            }
             if !q.regex.is_match(line) {
                 continue;
             }
