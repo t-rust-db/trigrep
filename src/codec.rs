@@ -44,23 +44,28 @@ pub fn unique_trigrams(bytes: &[u8]) -> Vec<i64> {
         return out;
     }
     let mut bits = vec![0u64; (1usize << 24) / 64];
-    let mut count = 0usize;
     for w in bytes.windows(3) {
-        let t = (usize::from(w[0]) << 16) | (usize::from(w[1]) << 8) | usize::from(w[2]);
-        let (word, bit) = (t / 64, t % 64);
-        let mask = 1u64 << bit;
-        if bits[word] & mask == 0 {
-            bits[word] |= mask;
-            count += 1;
+        let Some(&[a, b, c]) = w.first_chunk::<3>() else {
+            continue;
+        };
+        let t = pack([a, b, c]);
+        let idx = usize::try_from(t).unwrap_or(0);
+        let (word, bit) = (idx / 64, idx % 64);
+        if let Some(slot) = bits.get_mut(word) {
+            *slot |= 1u64.wrapping_shl(u32::try_from(bit).unwrap_or(0));
         }
     }
-    let mut out = Vec::with_capacity(count);
+    let mut out = Vec::new();
     for (wi, &word) in bits.iter().enumerate() {
         let mut w = word;
         while w != 0 {
-            let bit = w.trailing_zeros() as usize;
-            out.push(((wi * 64) + bit) as i64);
-            w &= w - 1;
+            let bit = w.trailing_zeros();
+            let t = i64::try_from(wi)
+                .unwrap_or(0)
+                .wrapping_mul(64)
+                .wrapping_add(i64::from(bit));
+            out.push(t);
+            w &= w.wrapping_sub(1);
         }
     }
     out
@@ -111,7 +116,7 @@ pub fn encode_postings(ids: &[i64]) -> Vec<u8> {
     let mut prev: i64 = 0;
     for &id in ids {
         let gap = id.wrapping_sub(prev);
-        push_leb128(&mut out, gap as u64);
+        push_leb128(&mut out, gap.cast_unsigned());
         prev = id;
     }
     out
@@ -135,6 +140,11 @@ pub fn decode_postings(buf: &[u8]) -> Result<Vec<i64>, CodecError> {
             };
             started = true;
             if shift >= 64 {
+                return Err(CodecError::Overlong);
+            }
+            // The 10th byte sits at shift 63: only its low bit fits a u64.
+            // Any higher payload bit would be shifted out silently (#13).
+            if shift == 63 && byte & 0x7e != 0 {
                 return Err(CodecError::Overlong);
             }
             gap |= u64::from(byte & 0x7f) << shift;
@@ -185,6 +195,101 @@ pub fn merge_into(into: &mut Vec<i64>, add: &[i64]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
+    #[allow(non_snake_case)]
+    mod mcdc_vectors {
+        //! Tagged MC/DC vectors (`mcdc__<file-stem>_<line>__vN`, joined to
+        //! `tests/mcdc/obligations.json` by `make test-mcdc`; trigrep#10).
+
+        // codec_147: `shift == 63 && byte & 0x7e != 0`
+        #[test]
+        fn mcdc__codec_147__v1_shift_not_63_never_triggers_overlong() {
+            // 9 continuation bytes reach shift 56, the 10th (shift 63) has
+            // its high bits clear: condition 1 false short-circuits.
+            let mut buf = vec![0x80u8; 9];
+            buf.push(0x01);
+            assert_eq!(
+                super::super::decode_postings(&buf),
+                Err(super::super::CodecError::Overflow)
+            );
+        }
+
+        #[test]
+        fn mcdc__codec_147__v2_shift_63_with_high_bits_is_overlong() {
+            // condition 1 true, condition 2 true (0x7e has bits 1-6 set).
+            let mut buf = vec![0x80u8; 9];
+            buf.push(0x7e);
+            assert_eq!(
+                super::super::decode_postings(&buf),
+                Err(super::super::CodecError::Overlong)
+            );
+        }
+
+        #[test]
+        fn mcdc__codec_147__v3_shift_63_no_high_bits_is_not_overlong() {
+            // condition 1 true, condition 2 false: falls through to Overflow,
+            // not Overlong — isolates condition 2's effect from v2.
+            let mut buf = vec![0x80u8; 9];
+            buf.push(0x00);
+            assert_ne!(
+                super::super::decode_postings(&buf),
+                Err(super::super::CodecError::Overlong)
+            );
+        }
+    }
+
+    proptest! {
+        /// #14: encode→decode is the identity on any sorted, unique, positive id list.
+        #[test]
+        fn postings_round_trip(mut ids in proptest::collection::vec(1i64..=(1i64 << 40), 0..200)) {
+            ids.sort_unstable();
+            ids.dedup();
+            let blob = super::encode_postings(&ids);
+            prop_assert_eq!(super::decode_postings(&blob).unwrap(), ids);
+        }
+
+        /// #14: decoding arbitrary bytes never panics — it returns Ok or a CodecError.
+        #[test]
+        fn decode_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
+            drop(super::decode_postings(&bytes));
+        }
+
+        /// #14: the two unique_trigrams strategies agree on both sides of the
+        /// 256 KiB threshold, for dense and sparse alphabets and tiny inputs.
+        #[test]
+        fn unique_trigrams_strategies_agree(
+            len in prop_oneof![0usize..8, (256usize << 10) - 4..(256usize << 10) + 4, 300usize << 10..(300usize << 10) + 2],
+            alphabet in 1u8..=255,
+            seed in any::<u64>(),
+        ) {
+            let mut x = seed | 1;
+            let bytes: Vec<u8> = (0..len).map(|_| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; (x % u64::from(alphabet)) as u8 }).collect();
+            let got = super::unique_trigrams(&bytes);
+            let mut want: Vec<i64> = bytes.windows(3).map(|w| super::pack([w[0], w[1], w[2]])).collect();
+            want.sort_unstable();
+            want.dedup();
+            prop_assert_eq!(got, want);
+        }
+    }
+    #[test]
+    fn tenth_varint_byte_with_high_payload_bits_is_overlong() {
+        // nine continuation bytes (shift reaches 63), then 0x7e: bits 1-6 set.
+        let mut buf = vec![0x80u8; 9];
+        buf.push(0x7e);
+        assert_eq!(
+            super::decode_postings(&buf),
+            Err(super::CodecError::Overlong)
+        );
+        // ...whereas a tenth byte of exactly 0x01 is the legal top bit.
+        let mut ok = vec![0x80u8; 9];
+        ok.push(0x01);
+        // 1 << 63 does not fit i64 → Overflow, never a silent wrong id.
+        assert_eq!(
+            super::decode_postings(&ok),
+            Err(super::CodecError::Overflow)
+        );
+    }
     #[test]
     fn bitmap_and_collect_paths_agree_on_large_input() {
         // Deterministic pseudo-random bytes past the bitmap threshold.

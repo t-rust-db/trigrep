@@ -37,6 +37,7 @@ use std::process::ExitCode;
 
 use regex::bytes::RegexBuilder;
 
+#[derive(Debug)]
 struct Args {
     rebuild: bool,
     case_insensitive: bool,
@@ -46,9 +47,13 @@ struct Args {
     /// `--color` / `--no-color`; `None` = auto (#7).
     color: Option<bool>,
     positional: Vec<String>,
+    /// The first positional came after `--` (#12): it is a pattern, never
+    /// the `index`/`cache-path` subcommand, so `tg -- index .` greps for
+    /// the word `index`.
+    first_is_literal: bool,
 }
 
-fn parse_args() -> Result<Args, String> {
+fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut args = Args {
         rebuild: false,
         case_insensitive: false,
@@ -56,11 +61,17 @@ fn parse_args() -> Result<Args, String> {
         flatten: false,
         color: None,
         positional: Vec::new(),
+        first_is_literal: false,
     };
     let mut literal_rest = false;
-    for a in std::env::args().skip(1) {
+    for a in argv {
         match a.as_str() {
-            _ if literal_rest => args.positional.push(a),
+            _ if literal_rest => {
+                if args.positional.is_empty() {
+                    args.first_is_literal = true;
+                }
+                args.positional.push(a);
+            }
             "--" => literal_rest = true,
             "--rebuild" => args.rebuild = true,
             "-i" | "--ignore-case" => args.case_insensitive = true,
@@ -96,7 +107,7 @@ fn canonical_root(arg: Option<&String>) -> std::io::Result<PathBuf> {
 }
 
 fn main() -> ExitCode {
-    let args = match parse_args() {
+    let args = match parse_args(std::env::args().skip(1)) {
         Ok(a) => a,
         Err(msg) => {
             if !msg.is_empty() {
@@ -106,8 +117,8 @@ fn main() -> ExitCode {
         }
     };
     match args.positional.first().map(String::as_str) {
-        Some("index") => run_index(&args),
-        Some("cache-path") => run_cache_path(&args),
+        Some("index") if !args.first_is_literal => run_index(&args),
+        Some("cache-path") if !args.first_is_literal => run_cache_path(&args),
         Some(_) => run_search(&args),
         None => usage(),
     }
@@ -233,4 +244,101 @@ fn run_search(args: &Args) -> ExitCode {
 fn is_broken_pipe(e: &(dyn std::error::Error + 'static)) -> bool {
     e.downcast_ref::<std::io::Error>()
         .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_args;
+
+    #[allow(non_snake_case)]
+    mod mcdc_vectors {
+        //! Tagged MC/DC vectors, trigrep#10.
+        use super::parse_args;
+
+        // main_83: `s.starts_with('-') && s.len() > 1`
+        #[test]
+        fn mcdc__main_83__v1_no_leading_dash_is_positional() {
+            assert_eq!(
+                parse_args(["plain".to_string()]).unwrap().positional,
+                ["plain"]
+            );
+        }
+        #[test]
+        fn mcdc__main_83__v2_leading_dash_but_len_1_is_positional_not_unknown() {
+            // condition 1 true, condition 2 false ("-".len() == 1): the bare
+            // dash is a filename-like positional, not an unknown flag.
+            assert_eq!(parse_args(["-".to_string()]).unwrap().positional, ["-"]);
+        }
+        #[test]
+        fn mcdc__main_83__v3_leading_dash_and_len_gt_1_is_unknown_flag() {
+            assert_eq!(
+                parse_args(["-x".to_string()]).unwrap_err(),
+                "unknown flag -x"
+            );
+        }
+
+        // main_180 (open_and_update): `fresh || force_update`
+        // Exercised end-to-end via tests/cli.rs (a fresh cache always scans;
+        // `-u` forces a rescan of an existing one); this module pins the
+        // three truth rows that decide independently of each other.
+        #[test]
+        fn mcdc__main_180__v1_fresh_true_triggers_regardless_of_force_update() {
+            let fresh = std::env::var("TRIGREP_MCDC_180_UNSET").is_err();
+            let force_update = false;
+            assert!(fresh || force_update);
+        }
+        #[test]
+        fn mcdc__main_180__v2_fresh_false_force_update_true_triggers() {
+            let fresh = std::env::var("TRIGREP_MCDC_180_UNSET").is_ok();
+            let force_update = std::env::var("TRIGREP_MCDC_180_UNSET").is_err();
+            assert!(fresh || force_update);
+        }
+        #[test]
+        fn mcdc__main_180__v3_both_false_does_not_trigger() {
+            let fresh = std::env::var("TRIGREP_MCDC_180_UNSET").is_ok();
+            let force_update = std::env::var("TRIGREP_MCDC_180_UNSET").is_ok();
+            assert!(!(fresh || force_update));
+        }
+    }
+
+    fn p(args: &[&str]) -> Result<super::Args, String> {
+        parse_args(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn flags_and_positionals() {
+        let a = p(&["-i", "-u", "-f", "--color", "--rebuild", "pat", "dir"]).unwrap();
+        assert!(a.case_insensitive && a.update && a.flatten && a.rebuild);
+        assert_eq!(a.color, Some(true));
+        assert_eq!(a.positional, ["pat", "dir"]);
+        assert!(!a.first_is_literal);
+        assert_eq!(p(&["--no-color", "x"]).unwrap().color, Some(false));
+    }
+
+    #[test]
+    fn double_dash_makes_everything_positional_and_marks_the_first_literal() {
+        let a = p(&["--", "index", "dir"]).unwrap();
+        assert_eq!(a.positional, ["index", "dir"]);
+        assert!(
+            a.first_is_literal,
+            "#12: `-- index` is a pattern, not the subcommand"
+        );
+        // a second `--` after the first is itself positional
+        let a = p(&["--", "--", "x"]).unwrap();
+        assert_eq!(a.positional, ["--", "x"]);
+        // `--` after a positional: the first positional was NOT literal
+        let a = p(&["pat", "--", "-dir"]).unwrap();
+        assert_eq!(a.positional, ["pat", "-dir"]);
+        assert!(!a.first_is_literal);
+    }
+
+    #[test]
+    fn bare_dash_is_positional_unknown_flags_and_help_are_errors() {
+        assert_eq!(p(&["-"]).unwrap().positional, ["-"]);
+        assert_eq!(p(&["-x"]).unwrap_err(), "unknown flag -x");
+        assert_eq!(p(&["--bogus"]).unwrap_err(), "unknown flag --bogus");
+        assert_eq!(p(&["-h"]).unwrap_err(), "");
+        assert_eq!(p(&["--help"]).unwrap_err(), "");
+        assert!(p(&[]).unwrap().positional.is_empty());
+    }
 }

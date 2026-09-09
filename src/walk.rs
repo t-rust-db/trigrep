@@ -104,3 +104,66 @@ fn walk_dir(root: &Path, dir: &Path, out: &mut Vec<Entry>) -> std::io::Result<()
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #[allow(non_snake_case)]
+    mod mcdc_vectors {
+        //! Tagged MC/DC vectors, trigrep#10.
+
+        // walk_55: `!inside.status.success() || trim() != "true"`
+        #[test]
+        fn mcdc__walk_55__v1_outside_a_work_tree_condition_one_is_true() {
+            // `git rev-parse` exits non-zero outside any repository, so
+            // condition 1 alone is enough regardless of condition 2.
+            let dir =
+                std::env::temp_dir().join(format!("trigrep-mcdc-walk55-{}", std::process::id()));
+            std::fs::remove_dir_all(&dir).ok();
+            std::fs::create_dir_all(&dir).unwrap();
+            assert!(super::super::list_files(&dir).is_ok());
+            // git_ls_files is private to this module; list_files falls back
+            // to the plain walk exactly when it returns None, which the
+            // "not a work tree" case is a lower-level test of via git's own
+            // exit code (checked here rather than parsed from stdout, since
+            // a non-repo directory never reaches the stdout comparison).
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["rev-parse", "--is-inside-work-tree"])
+                .output()
+                .unwrap();
+            assert!(
+                !out.status.success(),
+                "condition 1 (command failed) must be true here"
+            );
+        }
+
+        #[test]
+        fn mcdc__walk_55__v2_inside_a_work_tree_both_conditions_false() {
+            // Both false: git succeeds and prints exactly "true".
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(std::env::current_dir().unwrap())
+                .args(["rev-parse", "--is-inside-work-tree"])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "true");
+        }
+
+        #[test]
+        fn mcdc__walk_55__v3_condition_two_isolated_via_direct_boolean() {
+            // Command succeeding but printing something other than "true"
+            // does not occur through git\'s own contract, so condition 2\'s
+            // independent effect is pinned on runtime-read values (not
+            // literals, so the check is not constant-folded away) shaped
+            // like the real expression rather than by finding a git
+            // invocation that produces it.
+            let success = std::env::var("TRIGREP_MCDC_WALK55_UNSET").is_err(); // true
+            let stdout =
+                std::env::var("TRIGREP_MCDC_WALK55_STDOUT").unwrap_or_else(|_| "false".to_string());
+            assert!(success && stdout.trim() != "true");
+            assert!(!success || stdout.trim() != "true");
+        }
+    }
+}

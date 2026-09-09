@@ -1,6 +1,6 @@
 [package]
 name = "trigrep"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Serverless trigram-indexed grep: one SQLite-format cache file per root, no daemon, no SQL"
 license = "Apache-2.0"
@@ -17,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 # Storage only: the cache is a real SQLite file maintained through the
 # b-tree/pager layer. No db-core — nothing here needs a parser or a VM.
-db-storage = { version = "0.6.3", git = "https://github.com/t-rust-db/db-storage", tag = "v0.6.3", default-features = false, features = ["row"] }
+db-storage = { version = "0.6.4", git = "https://github.com/t-rust-db/db-storage", tag = "v0.6.4", default-features = false, features = ["row"] }
 # The regex engine plus its HIR (required-literal extraction narrows the
 # candidate set), and the XDG cache-dir lookup. Ordinary app dependencies:
 # this is a binary, not a library (sqlite-rs ADR-0040 does not apply).
@@ -26,8 +26,31 @@ regex-syntax = "0.8"
 dirs = "5"
 
 [dev-dependencies]
-db-storage = { version = "0.6.3", git = "https://github.com/t-rust-db/db-storage", tag = "v0.6.3", default-features = false, features = ["row", "test-support"] }
+# Property tests only (#14): never in the shipped binary's closure.
+proptest = "1"
+db-storage = { version = "0.6.4", git = "https://github.com/t-rust-db/db-storage", tag = "v0.6.4", default-features = false, features = ["row", "test-support"] }
 
 [profile.release]
 lto = true
 codegen-units = 1
+
+# Production rule (db-core#230, trigrep#9): production returns typed errors
+# and never panics; tests fail fast. clippy.toml's allow-*-in-tests and
+# lib.rs's cfg_attr(test, allow(...)) scope these to non-test code.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+let_underscore_must_use = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+arithmetic_side_effects = "deny"
+string_slice = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"

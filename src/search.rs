@@ -175,13 +175,13 @@ impl Output {
             if m.start() < at {
                 continue; // find_iter yields non-overlapping matches; guard anyway
             }
-            out.write_all(&line[at..m.start()])?;
+            out.write_all(line.get(at..m.start()).unwrap_or(&[]))?;
             if m.end() > m.start() {
-                self.paint(out, SGR_MATCH, &line[m.start()..m.end()])?;
+                self.paint(out, SGR_MATCH, line.get(m.start()..m.end()).unwrap_or(&[]))?;
             }
             at = m.end();
         }
-        out.write_all(&line[at..])
+        out.write_all(line.get(at..).unwrap_or(&[]))
     }
 }
 
@@ -218,7 +218,16 @@ pub fn run(cache: &Cache, q: &Query<'_>, o: &Output, out: &mut impl Write) -> Re
             .display()
             .to_string();
         let mut heading_written = false;
-        for (n, line) in bytes.split(|&b| b == b'\n').enumerate() {
+        // A file ending in '\n' splits into a trailing empty segment that
+        // is not a line; without this, `^` or `x*` reported a phantom
+        // last line (#11). A file without a trailing newline keeps its
+        // real last line.
+        let body = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+        let lines = body;
+        for (n, line) in lines.split(|&b| b == b'\n').enumerate() {
+            if lines.is_empty() {
+                break;
+            }
             if !q.regex.is_match(line) {
                 continue;
             }
@@ -255,6 +264,116 @@ pub fn run(cache: &Cache, q: &Query<'_>, o: &Output, out: &mut impl Write) -> Re
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
+    #[allow(non_snake_case)]
+    mod mcdc_vectors {
+        //! Tagged MC/DC vectors, trigrep#10.
+        use super::super::{Color, Output};
+
+        // search_144: `flatten || !is_tty`
+        #[test]
+        fn mcdc__search_144__v1_flatten_alone_forces_flat_on_a_tty() {
+            assert_eq!(
+                Output::resolve(true, true, None, false).layout,
+                super::super::Layout::Flat
+            );
+        }
+        #[test]
+        fn mcdc__search_144__v2_not_flatten_but_not_tty_is_flat() {
+            assert_eq!(
+                Output::resolve(false, false, None, false).layout,
+                super::super::Layout::Flat
+            );
+        }
+        #[test]
+        fn mcdc__search_144__v3_neither_is_grouped() {
+            assert_eq!(
+                Output::resolve(true, false, None, false).layout,
+                super::super::Layout::Grouped
+            );
+        }
+
+        // search_152: `is_tty && !no_color_env` (the `None` auto-colour arm)
+        #[test]
+        fn mcdc__search_152__v1_tty_and_no_env_is_on() {
+            assert_eq!(Output::resolve(true, false, None, false).color, Color::On);
+        }
+        #[test]
+        fn mcdc__search_152__v2_tty_but_no_color_env_set_is_off() {
+            assert_eq!(Output::resolve(true, false, None, true).color, Color::Off);
+        }
+        #[test]
+        fn mcdc__search_152__v3_not_tty_is_off_regardless_of_env() {
+            assert_eq!(Output::resolve(false, false, None, false).color, Color::Off);
+        }
+    }
+
+    /// #14, the property the whole index rests on: if the regex matches a
+    /// text, every required trigram of the pattern occurs in that text —
+    /// so narrowing by required trigrams can never drop a matching file.
+    fn pattern_strategy() -> impl Strategy<Value = String> {
+        let atom = prop_oneof![
+            "[a-c]{1,4}".prop_map(|s| s),
+            Just("[ab]".to_string()),
+            Just("(ab|bc)".to_string()),
+            Just("a?".to_string()),
+            Just("b+".to_string()),
+            Just("c*".to_string()),
+            Just("(?:abc)".to_string()),
+            Just("\\b".to_string()),
+            Just("^".to_string()),
+            Just(".".to_string()),
+        ];
+        proptest::collection::vec(atom, 1..5).prop_map(|v| v.concat())
+    }
+
+    proptest! {
+        #[test]
+        fn required_trigrams_never_exclude_a_match(
+            pat in pattern_strategy(),
+            text in "[a-c \\n]{0,40}",
+        ) {
+            let re = regex::bytes::Regex::new(&pat).unwrap();
+            let req = super::required_trigrams(&pat, false).unwrap();
+            if re.is_match(text.as_bytes()) {
+                if let Some(trigrams) = req {
+                    let present = super::super::codec::unique_trigrams(text.as_bytes());
+                    for t in trigrams {
+                        prop_assert!(present.binary_search(&t).is_ok(),
+                            "pattern {pat:?} matches {text:?} but required trigram {t} is absent");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn painter_handles_empty_matches_whole_line_and_non_utf8() {
+        use super::{Color, Layout, Output, Regex};
+        let o = Output {
+            layout: Layout::Flat,
+            color: Color::On,
+        };
+        let mut buf = Vec::new();
+        // empty-width matches paint nothing and do not loop or drop bytes
+        o.line(&mut buf, &Regex::new("x*").unwrap(), b"abc")
+            .unwrap();
+        assert_eq!(buf, b"abc");
+        buf.clear();
+        o.line(&mut buf, &Regex::new("^").unwrap(), b"abc").unwrap();
+        assert_eq!(buf, b"abc");
+        // whole-line match is one span
+        buf.clear();
+        o.line(&mut buf, &Regex::new("abc").unwrap(), b"abc")
+            .unwrap();
+        assert_eq!(buf, b"\x1b[1;31mabc\x1b[0m");
+        // non-UTF-8 bytes pass through untouched around a span
+        buf.clear();
+        o.line(&mut buf, &Regex::new("b").unwrap(), b"\xffab\xfe")
+            .unwrap();
+        assert_eq!(buf, b"\xffa\x1b[1;31mb\x1b[0m\xfe");
+    }
 
     #[test]
     fn output_resolution_follows_the_pipe_convention() {
@@ -300,10 +419,10 @@ mod tests {
     use super::*;
 
     fn lits(p: &str) -> Vec<Vec<u8>> {
-        required_literals(&regex_syntax::Parser::new().parse(p).unwrap_or_else(|e| {
-            // Test-only: a bad pattern is a bug in the test itself.
-            unreachable!("{e}")
-        }))
+        // Test-only helper; a bad pattern here is a bug in the test itself.
+        #[allow(clippy::unwrap_used)]
+        let hir = regex_syntax::Parser::new().parse(p).unwrap();
+        required_literals(&hir)
     }
 
     #[test]

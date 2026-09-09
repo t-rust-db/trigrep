@@ -1,0 +1,27 @@
+# cargo-deny policy for trigrep. See `make check-deny` / .github/workflows/ci.yml.
+# Adopted from db-core (t-rust-db/trigrep#9). The binary's runtime closure is
+# regex (+ regex-syntax, regex-automata, aho-corasick, memchr), dirs (+
+# dirs-sys, option-ext, libc) and db-storage (+ memmap2, ruzstd, twox-hash,
+# cfg-if, static_assertions, db-core).
+
+[graph]
+all-features = true
+
+[advisories]
+ignore = []
+
+[licenses]
+# trigrep is Apache-2.0. MIT/Unlicense arrive via regex's family and
+# db-storage's ruzstd/twox-hash; MPL-2.0 only via option-ext (dirs-sys).
+allow = ["Apache-2.0", "MIT", "Unlicense", "MPL-2.0", "Unicode-3.0"]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/t-rust-db/db-storage", "https://github.com/t-rust-db/db-core"]
