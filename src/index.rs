@@ -157,100 +157,89 @@ fn read_indexable(path: &Path, size: u64) -> Option<Vec<u8>> {
 }
 
 /// Brings the cache for `root` up to date with the filesystem.
-pub fn update(cache: &mut Cache, root: &Path) -> Result<Stats> {
-    let mut stats = Stats::default();
-    let existing: HashMap<String, FileMeta> = load_files(cache)?
-        .into_iter()
-        .map(|f| (f.path.clone(), f))
-        .collect();
-    let mut next_id = existing.values().map(|f| f.id).max().unwrap_or(0);
+/// Chunk bounds for the write phase (#3). A build used to hold every
+/// pending posting list until one commit at the end — 1.1 GB RSS on a
+/// 1 GB tree. Now files are processed in windows and each window is its
+/// own `Pager` transaction, so peak memory is one window's postings and a
+/// kill leaves the cache at the last window boundary. Env overrides exist
+/// so the crash test can force tiny windows.
+pub const CHUNK_FILES_ENV: &str = "TRIGREP_CHUNK_FILES";
+pub const CHUNK_BYTES_ENV: &str = "TRIGREP_CHUNK_BYTES";
+const DEFAULT_CHUNK_FILES: usize = 4_000;
+const DEFAULT_CHUNK_BYTES: usize = 256 << 20;
 
-    // Pending writes, all applied below in one transaction.
-    let mut file_rows: Vec<(Option<i64>, Option<FileMeta>)> = Vec::new(); // (delete id, insert)
-    let mut pending: BTreeMap<i64, Vec<i64>> = BTreeMap::new(); // trigram -> new ids
-    let mut seen: HashMap<&str, ()> = HashMap::new();
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default)
+}
 
-    let present = crate::walk::list_files(root)?;
-    for entry in present {
-        let rel = entry.rel;
-        let full = root.join(&rel);
-        // Reuse the walk's own `stat` when it already did one (the
-        // non-git fallback) instead of paying for a second one here
-        // (#38); a git-sourced entry has none yet, so this is the only
-        // stat that path pays.
-        let meta = match entry.metadata {
-            Some(m) => m,
-            None => {
-                let Ok(m) = std::fs::metadata(&full) else {
-                    continue; // listed (e.g. by git) but gone: same as absent
-                };
-                m
-            }
-        };
-        if !meta.is_file() {
-            continue;
-        }
-        let old = existing.get(rel.as_str());
-        if let Some(old) = old {
-            seen.insert(old.path.as_str(), ());
-        }
-        let mtime = mtime_nanos(&meta);
-        let size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
-        if let Some(old) = old {
-            if old.mtime == mtime && old.size == size {
-                stats.unchanged = stats.unchanged.saturating_add(1);
-                continue;
-            }
-        }
-        let Some(bytes) = read_indexable(&full, meta.len()) else {
-            if let Some(old) = old {
-                file_rows.push((Some(old.id), None));
-                stats.removed = stats.removed.saturating_add(1);
-            }
-            continue;
-        };
-        let hash = fnv1a64(&bytes) as i64;
-        let (id, reindex) = match old {
-            Some(old) if old.hash == hash => (old.id, false),
-            Some(old) => (old.id, true),
-            None => {
-                next_id = next_id.checked_add(1).ok_or("file id space exhausted")?;
-                (next_id, true)
-            }
-        };
-        let row = FileMeta {
-            id,
-            path: rel.clone(),
-            mtime,
-            size,
-            hash,
-        };
-        file_rows.push((old.map(|o| o.id), Some(row)));
-        match (old.is_some(), reindex) {
-            (true, false) => stats.unchanged = stats.unchanged.saturating_add(1),
-            (true, true) => stats.changed = stats.changed.saturating_add(1),
-            (false, _) => stats.added = stats.added.saturating_add(1),
-        }
-        if reindex {
-            for t in codec::unique_trigrams(&bytes) {
-                pending.entry(t).or_default().push(id);
-            }
+/// Per-file work that does not touch the cache: stat, read, hash,
+/// trigram extraction. Pure in the path, so it can run anywhere.
+struct Scanned {
+    rel: String,
+    /// `None`: listed but unreadable/gone/binary/too large → treat as absent.
+    body: Option<(i64, i64, i64, Option<Vec<i64>>)>, // (mtime, size, hash, trigrams if content must be indexed)
+}
+
+fn scan_one(root: &Path, entry: crate::walk::Entry, old: Option<&FileMeta>) -> Scanned {
+    let rel = entry.rel;
+    let full = root.join(&rel);
+    let meta = match entry.metadata {
+        Some(m) => m,
+        None => match std::fs::metadata(&full) {
+            Ok(m) => m,
+            Err(_) => return Scanned { rel, body: None },
+        },
+    };
+    if !meta.is_file() {
+        return Scanned { rel, body: None };
+    }
+    let mtime = mtime_nanos(&meta);
+    let size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
+    if let Some(old) = old {
+        if old.mtime == mtime && old.size == size {
+            // Unchanged by stat: keep the stored hash, no content read.
+            return Scanned {
+                rel,
+                body: Some((mtime, size, old.hash, None)),
+            };
         }
     }
-    for old in existing.values() {
-        if !seen.contains_key(old.path.as_str()) {
-            file_rows.push((Some(old.id), None));
-            stats.removed = stats.removed.saturating_add(1);
-        }
+    let Some(bytes) = read_indexable(&full, meta.len()) else {
+        return Scanned { rel, body: None };
+    };
+    let hash = fnv1a64(&bytes) as i64;
+    let trigrams = match old {
+        Some(old) if old.hash == hash => None, // touched, same content
+        _ => Some(codec::unique_trigrams(&bytes)),
+    };
+    Scanned {
+        rel,
+        body: Some((mtime, size, hash, trigrams)),
     }
+}
 
-    if file_rows.is_empty() {
-        return Ok(stats);
+/// One transaction: the window's file rows, the posting lists they touch,
+/// and (on the first window) the in-progress marker.
+fn commit_chunk(
+    cache: &mut Cache,
+    file_rows: &mut Vec<(Option<i64>, Option<FileMeta>)>,
+    pending: &mut BTreeMap<i64, Vec<i64>>,
+    stats: &mut Stats,
+    first: &mut bool,
+    last: bool,
+) -> Result<()> {
+    if file_rows.is_empty() && !last && !*first {
+        pending.clear();
+        return Ok(());
     }
-
     // Phase A: read every touched posting list (immutable borrow).
     let mut rewrites: Vec<(i64, bool, Vec<u8>)> = Vec::with_capacity(pending.len());
-    for (trigram, mut ids) in pending {
+    for (trigram, ids) in std::mem::take(pending) {
+        let mut ids = ids;
         ids.sort_unstable();
         ids.dedup();
         let mut current = lookup_postings(cache, trigram)?;
@@ -259,16 +248,34 @@ pub fn update(cache: &mut Cache, root: &Path) -> Result<Stats> {
             rewrites.push((trigram, existed, encode_postings_row(&current, cache)));
         }
     }
-
-    // Phase B: one transaction, committed by `flush` (rolled back on the
-    // next open if we die before it completes).
+    // Phase B: the transaction, committed by `flush`.
     let header = cache.header;
-    for (delete_id, insert) in &file_rows {
+    if *first {
+        let marker = encode_record(
+            &[Value::Text("incomplete".into()), Value::Text("1".into())],
+            header.text_encoding,
+        );
+        ignore_missing(delete_row(
+            &mut cache.pager,
+            &header,
+            cache.meta_root,
+            crate::cache::META_INCOMPLETE_ROWID,
+        ))?;
+        insert_row(
+            &mut cache.pager,
+            &header,
+            cache.meta_root,
+            crate::cache::META_INCOMPLETE_ROWID,
+            &marker,
+        )?;
+        *first = false;
+    }
+    for (delete_id, insert) in file_rows.drain(..) {
         if let Some(id) = delete_id {
-            ignore_missing(delete_row(&mut cache.pager, &header, cache.files_root, *id))?;
+            ignore_missing(delete_row(&mut cache.pager, &header, cache.files_root, id))?;
         }
         if let Some(f) = insert {
-            let record = encode_file(f, cache);
+            let record = encode_file(&f, cache);
             insert_row(&mut cache.pager, &header, cache.files_root, f.id, &record)?;
         }
     }
@@ -284,9 +291,153 @@ pub fn update(cache: &mut Cache, root: &Path) -> Result<Stats> {
             blob,
         )?;
     }
-    stats.trigrams_rewritten = rewrites.len();
+    stats.trigrams_rewritten = stats.trigrams_rewritten.saturating_add(rewrites.len());
+    if last {
+        ignore_missing(delete_row(
+            &mut cache.pager,
+            &header,
+            cache.meta_root,
+            crate::cache::META_INCOMPLETE_ROWID,
+        ))?;
+    }
     cache.pager.flush()?;
+    Ok(())
+}
+
+pub fn update(cache: &mut Cache, root: &Path) -> Result<Stats> {
+    let mut stats = Stats::default();
+    let existing: HashMap<String, FileMeta> = load_files(cache)?
+        .into_iter()
+        .map(|f| (f.path.clone(), f))
+        .collect();
+    let mut next_id = existing.values().map(|f| f.id).max().unwrap_or(0);
+    let chunk_files = env_usize(CHUNK_FILES_ENV, DEFAULT_CHUNK_FILES);
+    let chunk_bytes = env_usize(CHUNK_BYTES_ENV, DEFAULT_CHUNK_BYTES);
+
+    let mut file_rows: Vec<(Option<i64>, Option<FileMeta>)> = Vec::new();
+    let mut pending: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    let mut pending_bytes = 0usize;
+    let mut seen: HashMap<String, ()> = HashMap::new();
+    let mut first = true;
+
+    let present = crate::walk::list_files(root)?;
+    let mut window: Vec<crate::walk::Entry> = Vec::with_capacity(chunk_files);
+    let mut iter = present.into_iter().peekable();
+    while iter.peek().is_some() {
+        window.clear();
+        while window.len() < chunk_files {
+            match iter.next() {
+                Some(e) => window.push(e),
+                None => break,
+            }
+        }
+        let scanned = scan_window(root, std::mem::take(&mut window), &existing);
+        for sc in scanned {
+            let old = existing.get(sc.rel.as_str());
+            if let Some(old) = old {
+                seen.insert(old.path.clone(), ());
+            }
+            let Some((mtime, size, hash, trigrams)) = sc.body else {
+                if let Some(old) = old {
+                    file_rows.push((Some(old.id), None));
+                    stats.removed = stats.removed.saturating_add(1);
+                }
+                continue;
+            };
+            if let Some(old) = old {
+                if old.mtime == mtime && old.size == size {
+                    stats.unchanged = stats.unchanged.saturating_add(1);
+                    continue;
+                }
+            }
+            let (id, reindex) = match (old, &trigrams) {
+                (Some(old), None) => (old.id, false),
+                (Some(old), Some(_)) => (old.id, true),
+                (None, _) => {
+                    next_id = next_id.checked_add(1).ok_or("file id space exhausted")?;
+                    (next_id, true)
+                }
+            };
+            let row = FileMeta {
+                id,
+                path: sc.rel.clone(),
+                mtime,
+                size,
+                hash,
+            };
+            file_rows.push((old.map(|o| o.id), Some(row)));
+            match (old.is_some(), reindex) {
+                (true, false) => stats.unchanged = stats.unchanged.saturating_add(1),
+                (true, true) => stats.changed = stats.changed.saturating_add(1),
+                (false, _) => stats.added = stats.added.saturating_add(1),
+            }
+            if let Some(ts) = trigrams {
+                pending_bytes = pending_bytes.saturating_add(ts.len() * 8);
+                for t in ts {
+                    pending.entry(t).or_default().push(id);
+                }
+            }
+            if file_rows.len() >= chunk_files || pending_bytes >= chunk_bytes {
+                commit_chunk(
+                    cache,
+                    &mut file_rows,
+                    &mut pending,
+                    &mut stats,
+                    &mut first,
+                    false,
+                )?;
+                pending_bytes = 0;
+            }
+        }
+    }
+    for old in existing.values() {
+        if !seen.contains_key(old.path.as_str()) {
+            file_rows.push((Some(old.id), None));
+            stats.removed = stats.removed.saturating_add(1);
+        }
+    }
+    if file_rows.is_empty() && first {
+        // Nothing changed and no window was committed: but a stale marker
+        // from a killed run may still be there — clear it.
+        let header = cache.header;
+        let mut cur = TableCursor::new(&cache.pager, &header, cache.meta_root);
+        if cur.seek_row(crate::cache::META_INCOMPLETE_ROWID)?.is_some() {
+            delete_row(
+                &mut cache.pager,
+                &header,
+                cache.meta_root,
+                crate::cache::META_INCOMPLETE_ROWID,
+            )?;
+            cache.pager.flush()?;
+        }
+        return Ok(stats);
+    }
+    commit_chunk(
+        cache,
+        &mut file_rows,
+        &mut pending,
+        &mut stats,
+        &mut first,
+        true,
+    )?;
     Ok(stats)
+}
+
+/// Scans one window of entries. Sequential here; #4 parallelises this
+/// function and nothing else, which keeps id assignment (done by the
+/// caller, in path order) independent of thread scheduling.
+fn scan_window(
+    root: &Path,
+    window: Vec<crate::walk::Entry>,
+    existing: &HashMap<String, FileMeta>,
+) -> Vec<Scanned> {
+    window
+        .into_iter()
+        .map(|e| {
+            let old = existing.get(e.rel.as_str());
+            scan_one(root, e, old)
+        })
+        .collect()
 }
 
 fn ignore_missing(r: std::result::Result<(), BtreeError>) -> Result<()> {
