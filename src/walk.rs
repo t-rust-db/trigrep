@@ -143,7 +143,7 @@ mod tests {
             // Both false: git succeeds and prints exactly "true".
             let out = std::process::Command::new("git")
                 .arg("-C")
-                .arg(env!("CARGO_MANIFEST_DIR"))
+                .arg(std::env::current_dir().unwrap())
                 .args(["rev-parse", "--is-inside-work-tree"])
                 .output()
                 .unwrap();
