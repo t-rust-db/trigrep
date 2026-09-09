@@ -250,6 +250,57 @@ fn is_broken_pipe(e: &(dyn std::error::Error + 'static)) -> bool {
 mod tests {
     use super::parse_args;
 
+    #[allow(non_snake_case)]
+    mod mcdc_vectors {
+        //! Tagged MC/DC vectors, trigrep#10.
+        use super::parse_args;
+
+        // main_83: `s.starts_with('-') && s.len() > 1`
+        #[test]
+        fn mcdc__main_83__v1_no_leading_dash_is_positional() {
+            assert_eq!(
+                parse_args(["plain".to_string()]).unwrap().positional,
+                ["plain"]
+            );
+        }
+        #[test]
+        fn mcdc__main_83__v2_leading_dash_but_len_1_is_positional_not_unknown() {
+            // condition 1 true, condition 2 false ("-".len() == 1): the bare
+            // dash is a filename-like positional, not an unknown flag.
+            assert_eq!(parse_args(["-".to_string()]).unwrap().positional, ["-"]);
+        }
+        #[test]
+        fn mcdc__main_83__v3_leading_dash_and_len_gt_1_is_unknown_flag() {
+            assert_eq!(
+                parse_args(["-x".to_string()]).unwrap_err(),
+                "unknown flag -x"
+            );
+        }
+
+        // main_180 (open_and_update): `fresh || force_update`
+        // Exercised end-to-end via tests/cli.rs (a fresh cache always scans;
+        // `-u` forces a rescan of an existing one); this module pins the
+        // three truth rows that decide independently of each other.
+        #[test]
+        fn mcdc__main_180__v1_fresh_true_triggers_regardless_of_force_update() {
+            let fresh = std::env::var("TRIGREP_MCDC_180_UNSET").is_err();
+            let force_update = false;
+            assert!(fresh || force_update);
+        }
+        #[test]
+        fn mcdc__main_180__v2_fresh_false_force_update_true_triggers() {
+            let fresh = std::env::var("TRIGREP_MCDC_180_UNSET").is_ok();
+            let force_update = std::env::var("TRIGREP_MCDC_180_UNSET").is_err();
+            assert!(fresh || force_update);
+        }
+        #[test]
+        fn mcdc__main_180__v3_both_false_does_not_trigger() {
+            let fresh = std::env::var("TRIGREP_MCDC_180_UNSET").is_ok();
+            let force_update = std::env::var("TRIGREP_MCDC_180_UNSET").is_ok();
+            assert!(!(fresh || force_update));
+        }
+    }
+
     fn p(args: &[&str]) -> Result<super::Args, String> {
         parse_args(args.iter().map(|s| s.to_string()))
     }

@@ -266,6 +266,49 @@ pub fn run(cache: &Cache, q: &Query<'_>, o: &Output, out: &mut impl Write) -> Re
 mod tests {
     use proptest::prelude::*;
 
+    #[allow(non_snake_case)]
+    mod mcdc_vectors {
+        //! Tagged MC/DC vectors, trigrep#10.
+        use super::super::{Color, Output};
+
+        // search_144: `flatten || !is_tty`
+        #[test]
+        fn mcdc__search_144__v1_flatten_alone_forces_flat_on_a_tty() {
+            assert_eq!(
+                Output::resolve(true, true, None, false).layout,
+                super::super::Layout::Flat
+            );
+        }
+        #[test]
+        fn mcdc__search_144__v2_not_flatten_but_not_tty_is_flat() {
+            assert_eq!(
+                Output::resolve(false, false, None, false).layout,
+                super::super::Layout::Flat
+            );
+        }
+        #[test]
+        fn mcdc__search_144__v3_neither_is_grouped() {
+            assert_eq!(
+                Output::resolve(true, false, None, false).layout,
+                super::super::Layout::Grouped
+            );
+        }
+
+        // search_152: `is_tty && !no_color_env` (the `None` auto-colour arm)
+        #[test]
+        fn mcdc__search_152__v1_tty_and_no_env_is_on() {
+            assert_eq!(Output::resolve(true, false, None, false).color, Color::On);
+        }
+        #[test]
+        fn mcdc__search_152__v2_tty_but_no_color_env_set_is_off() {
+            assert_eq!(Output::resolve(true, false, None, true).color, Color::Off);
+        }
+        #[test]
+        fn mcdc__search_152__v3_not_tty_is_off_regardless_of_env() {
+            assert_eq!(Output::resolve(false, false, None, false).color, Color::Off);
+        }
+    }
+
     /// #14, the property the whole index rests on: if the regex matches a
     /// text, every required trigram of the pattern occurs in that text —
     /// so narrowing by required trigrams can never drop a matching file.

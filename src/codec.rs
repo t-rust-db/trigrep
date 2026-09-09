@@ -197,6 +197,48 @@ pub fn merge_into(into: &mut Vec<i64>, add: &[i64]) -> bool {
 mod tests {
     use proptest::prelude::*;
 
+    #[allow(non_snake_case)]
+    mod mcdc_vectors {
+        //! Tagged MC/DC vectors (`mcdc__<file-stem>_<line>__vN`, joined to
+        //! `tests/mcdc/obligations.json` by `make test-mcdc`; trigrep#10).
+
+        // codec_147: `shift == 63 && byte & 0x7e != 0`
+        #[test]
+        fn mcdc__codec_147__v1_shift_not_63_never_triggers_overlong() {
+            // 9 continuation bytes reach shift 56, the 10th (shift 63) has
+            // its high bits clear: condition 1 false short-circuits.
+            let mut buf = vec![0x80u8; 9];
+            buf.push(0x01);
+            assert_eq!(
+                super::super::decode_postings(&buf),
+                Err(super::super::CodecError::Overflow)
+            );
+        }
+
+        #[test]
+        fn mcdc__codec_147__v2_shift_63_with_high_bits_is_overlong() {
+            // condition 1 true, condition 2 true (0x7e has bits 1-6 set).
+            let mut buf = vec![0x80u8; 9];
+            buf.push(0x7e);
+            assert_eq!(
+                super::super::decode_postings(&buf),
+                Err(super::super::CodecError::Overlong)
+            );
+        }
+
+        #[test]
+        fn mcdc__codec_147__v3_shift_63_no_high_bits_is_not_overlong() {
+            // condition 1 true, condition 2 false: falls through to Overflow,
+            // not Overlong — isolates condition 2's effect from v2.
+            let mut buf = vec![0x80u8; 9];
+            buf.push(0x00);
+            assert_ne!(
+                super::super::decode_postings(&buf),
+                Err(super::super::CodecError::Overlong)
+            );
+        }
+    }
+
     proptest! {
         /// #14: encode→decode is the identity on any sorted, unique, positive id list.
         #[test]
