@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.3.0] - 2026-09-09
+
+Gate suite adopted from db-core/mvl-lang's approach, plus three real bugs
+found while auditing for testability.
+
+### Fixed
+- Patterns matching the empty string (`^`, `x*`) reported a phantom
+  trailing line on any file ending in `\n` (#11).
+- `--` did not escape subcommand dispatch: `tg -- index .` ran the
+  indexer instead of searching for the literal word "index" (#12).
+- The posting-list varint decoder silently dropped bits 1-6 of a
+  malformed 10th byte instead of returning `Overlong` (#13).
+- A zero-byte cache file was refused (exit 2); SQLite's own rule treats
+  an empty file as a valid empty database, so it is now bootstrapped.
+- `mtime == 0` (the "mtime unavailable" fallback) no longer short-circuits
+  the content hash — closes a window where an edit could stay invisible.
+- `.cargo/config.toml` (a local-dev-only sibling-checkout override) was
+  accidentally committed, breaking CI for anyone without that sibling.
+  Untracked and gitignored.
+
+### Added
+- `deny.toml`, a production panic-lint policy (`[lints.clippy]`:
+  `unwrap_used`/`expect_used`/`indexing_slicing`/`panic`/
+  `arithmetic_side_effects`/`string_slice`/`cast_*` all deny in `src/`,
+  scoped off test code via `clippy.toml` + `lib.rs`), the
+  `cargo-mvl-limit` qualified-subset gate (4 files exempted with a
+  documented reason), and a CI workflow (lint, deny, mvl-limit, test).
+- MC/DC: all 12 multi-condition decisions found by `cargo-mvl-mcdc`
+  discharged with tagged test vectors (`make test-mcdc`: PASS).
+- Property tests: posting-list encode/decode round-trip, decode never
+  panics on arbitrary bytes, `unique_trigrams`' two strategies agree
+  across the 256 KiB threshold, and — the correctness property the whole
+  index rests on — a pattern's required trigrams are always present in
+  any text the regex actually matches.
+- CLI tests: multi-window builds byte-identical across thread counts
+  1/2/3/7/8, text-to-binary-to-text re-index, a closed pipe (`| head`)
+  exits 0 silently, foreign/zero-byte/garbage cache files.
+- Test count: 44 -> 84 (plus the crash-torture test). Line coverage
+  93.98% (floor 85%).
+
+Companion: t-rust-db/db-storage v0.6.4 adds the `license` field its
+`Cargo.toml` was missing (t-rust-db/db-storage#33), pinned here.
+
+
 ## [0.2.0] - 2026-09-09
 
 ### Added
