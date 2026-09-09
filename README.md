@@ -47,8 +47,10 @@ latency. `-u`/`--update` asks for the refresh; `tg index` does it explicitly.
 
 Inside a git work tree `.gitignore` is honoured via `git ls-files
 --exclude-standard` (git is a runtime dependency there); outside, a plain walk
-that skips `.git` and never follows symlinks. Binaries (NUL in the first
-8 KiB), symlinks and files over 64 MiB are skipped. Exit codes follow grep:
+that skips `.git` and never follows symlinks. Binaries — a NUL or more than
+5% control bytes in the first 8 KiB, or a known binary extension (pdf,
+images, archives, fonts, media, objects, office documents) — symlinks and
+files over 64 MiB are skipped. Exit codes follow grep:
 0 matched, 1 nothing, 2 error.
 
 The cache lives at `$TRIGREP_CACHE_DIR/<key>.db`, or by default

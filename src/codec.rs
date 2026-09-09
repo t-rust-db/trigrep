@@ -22,16 +22,47 @@ pub fn pack(t: [u8; 3]) -> i64 {
 
 /// Every distinct trigram of `bytes`, sorted ascending. Inputs shorter
 /// than three bytes have none.
+///
+/// Two strategies, same result. Small inputs collect-sort-dedup. Large
+/// inputs (#3) mark a 2^24-bit bitmap instead: collecting first costs
+/// 8 bytes per input byte *before* dedup — a 7.7 MB file became a 62 MB
+/// vector, and with eight reader threads in flight that, not the pager,
+/// was the build's peak RSS. The bitmap is a flat 2 MiB whatever the
+/// input, and scanning it yields the trigrams already sorted.
 pub fn unique_trigrams(bytes: &[u8]) -> Vec<i64> {
-    let mut out: Vec<i64> = bytes
-        .windows(3)
-        .filter_map(|w| match *w {
-            [a, b, c] => Some(pack([a, b, c])),
-            _ => None,
-        })
-        .collect();
-    out.sort_unstable();
-    out.dedup();
+    const BITMAP_THRESHOLD: usize = 256 << 10;
+    if bytes.len() < BITMAP_THRESHOLD {
+        let mut out: Vec<i64> = bytes
+            .windows(3)
+            .filter_map(|w| match *w {
+                [a, b, c] => Some(pack([a, b, c])),
+                _ => None,
+            })
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        return out;
+    }
+    let mut bits = vec![0u64; (1usize << 24) / 64];
+    let mut count = 0usize;
+    for w in bytes.windows(3) {
+        let t = (usize::from(w[0]) << 16) | (usize::from(w[1]) << 8) | usize::from(w[2]);
+        let (word, bit) = (t / 64, t % 64);
+        let mask = 1u64 << bit;
+        if bits[word] & mask == 0 {
+            bits[word] |= mask;
+            count += 1;
+        }
+    }
+    let mut out = Vec::with_capacity(count);
+    for (wi, &word) in bits.iter().enumerate() {
+        let mut w = word;
+        while w != 0 {
+            let bit = w.trailing_zeros() as usize;
+            out.push(((wi * 64) + bit) as i64);
+            w &= w - 1;
+        }
+    }
     out
 }
 
@@ -154,6 +185,28 @@ pub fn merge_into(into: &mut Vec<i64>, add: &[i64]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bitmap_and_collect_paths_agree_on_large_input() {
+        // Deterministic pseudo-random bytes past the bitmap threshold.
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let bytes: Vec<u8> = (0..(300usize << 10))
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x & 0x3f) as u8 + b'0' // 64-symbol alphabet keeps the set dense but not full
+            })
+            .collect();
+        let via_bitmap = super::unique_trigrams(&bytes);
+        let mut via_collect: Vec<i64> = bytes
+            .windows(3)
+            .map(|w| super::pack([w[0], w[1], w[2]]))
+            .collect();
+        via_collect.sort_unstable();
+        via_collect.dedup();
+        assert_eq!(via_bitmap, via_collect);
+        assert!(via_bitmap.windows(2).all(|p| p[0] < p[1]));
+    }
     use super::*;
 
     #[test]

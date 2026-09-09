@@ -188,6 +188,12 @@ be neither followed nor indexed.
 
 **Tests:** `tests/unit/trigrep_cli_test.rs::gitignore_is_honored_inside_a_work_tree`
 
+#### Scenario: A PDF with no NUL in its first 8 KiB is still binary
+
+- GIVEN a `.pdf` whose first 8 KiB contains no NUL byte
+- WHEN the tree is indexed
+- THEN the file is skipped by extension, and a NUL-free byte stream with more than 5% control bytes is skipped by content
+
 #### Scenario: Binary and symlink skipped
 
 - GIVEN a text file, a binary file with a NUL byte, and a symlink to the

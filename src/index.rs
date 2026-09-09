@@ -131,8 +131,115 @@ fn encode_postings_row(ids: &[i64], cache: &Cache) -> Vec<u8> {
 
 /// Files with a NUL in their first 8 KiB are binary: not indexed, not
 /// searched — grep's own heuristic.
+/// Content check, tgrep's two-part rule (#3): a NUL in the first 8 KiB,
+/// or more than 5% control bytes there (excluding tab, LF, CR — UTF-8
+/// high bytes are fine). The NUL rule alone let every PDF in a 9k-file
+/// tree through: 19 MB of compressed streams whose near-random bytes
+/// yield millions of distinct trigrams per file — the build's real peak
+/// memory, and a lot of useless index.
 pub fn is_binary(bytes: &[u8]) -> bool {
-    bytes.iter().take(8192).any(|&b| b == 0)
+    let head = &bytes[..bytes.len().min(8192)];
+    if head.contains(&0) {
+        return true;
+    }
+    let control = head
+        .iter()
+        .filter(|&&b| b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r' || b == 0x7f)
+        .count();
+    control * 20 > head.len()
+}
+
+/// Extension check, the other half of tgrep's rule: formats that are
+/// never text regardless of how their first bytes look.
+pub fn is_binary_name(path: &Path) -> bool {
+    const BINARY_EXTS: &[&str] = &[
+        "pdf",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "bmp",
+        "ico",
+        "webp",
+        "tif",
+        "tiff",
+        "psd",
+        "svgz",
+        "zip",
+        "gz",
+        "tgz",
+        "bz2",
+        "xz",
+        "zst",
+        "7z",
+        "rar",
+        "jar",
+        "war",
+        "tar",
+        "lz4",
+        "woff",
+        "woff2",
+        "ttf",
+        "otf",
+        "eot",
+        "mp3",
+        "mp4",
+        "m4a",
+        "mov",
+        "avi",
+        "mkv",
+        "wav",
+        "ogg",
+        "flac",
+        "webm",
+        "exe",
+        "dll",
+        "so",
+        "dylib",
+        "a",
+        "o",
+        "obj",
+        "lib",
+        "class",
+        "pyc",
+        "pyo",
+        "wasm",
+        "bin",
+        "dat",
+        "db",
+        "sqlite",
+        "sqlite3",
+        "parquet",
+        "arrow",
+        "doc",
+        "docx",
+        "xls",
+        "xlsx",
+        "ppt",
+        "pptx",
+        "odt",
+        "ods",
+        "odp",
+        "dmg",
+        "iso",
+        "img",
+        "pkl",
+        "npy",
+        "npz",
+        "h5",
+        "hdf5",
+        "onnx",
+        "pb",
+        "pt",
+        "safetensors",
+    ];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let lower = e.to_ascii_lowercase();
+            BINARY_EXTS.contains(&lower.as_str())
+        })
+        .unwrap_or(false)
 }
 
 fn mtime_nanos(meta: &std::fs::Metadata) -> i64 {
@@ -146,7 +253,7 @@ fn mtime_nanos(meta: &std::fs::Metadata) -> i64 {
 /// Content read for a file that will be (re)indexed, or `None` when it
 /// is to be treated as absent (binary, oversized, or gone meanwhile).
 fn read_indexable(path: &Path, size: u64) -> Option<Vec<u8>> {
-    if size > MAX_FILE_SIZE {
+    if size > MAX_FILE_SIZE || is_binary_name(path) {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
@@ -165,8 +272,16 @@ fn read_indexable(path: &Path, size: u64) -> Option<Vec<u8>> {
 /// so the crash test can force tiny windows.
 pub const CHUNK_FILES_ENV: &str = "TRIGREP_CHUNK_FILES";
 pub const CHUNK_BYTES_ENV: &str = "TRIGREP_CHUNK_BYTES";
+/// Third trigger: distinct trigrams pending. On a tree with a wide byte
+/// vocabulary (data files, generated text) a 4,000-file window can touch
+/// millions of posting lists, and it is that map — plus the pager's dirty
+/// pages for one transaction — that fills memory, not the file count
+/// (measured 2026-09-09: 9k files, 9.1M distinct trigrams, 1.7 GB RSS with
+/// file-count chunking alone).
+pub const CHUNK_TRIGRAMS_ENV: &str = "TRIGREP_CHUNK_TRIGRAMS";
 const DEFAULT_CHUNK_FILES: usize = 4_000;
 const DEFAULT_CHUNK_BYTES: usize = 256 << 20;
+const DEFAULT_CHUNK_TRIGRAMS: usize = 1_000_000;
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -236,19 +351,7 @@ fn commit_chunk(
         pending.clear();
         return Ok(());
     }
-    // Phase A: read every touched posting list (immutable borrow).
-    let mut rewrites: Vec<(i64, bool, Vec<u8>)> = Vec::with_capacity(pending.len());
-    for (trigram, ids) in std::mem::take(pending) {
-        let mut ids = ids;
-        ids.sort_unstable();
-        ids.dedup();
-        let mut current = lookup_postings(cache, trigram)?;
-        let existed = !current.is_empty();
-        if codec::merge_into(&mut current, &ids) {
-            rewrites.push((trigram, existed, encode_postings_row(&current, cache)));
-        }
-    }
-    // Phase B: the transaction, committed by `flush`.
+    // The transaction, committed by `flush`: marker (first chunk), file rows, posting lists.
     let header = cache.header;
     if *first {
         let marker = encode_record(
@@ -279,19 +382,34 @@ fn commit_chunk(
             insert_row(&mut cache.pager, &header, cache.files_root, f.id, &record)?;
         }
     }
-    for (trigram, existed, blob) in &rewrites {
-        if *existed {
-            delete_row(&mut cache.pager, &header, cache.trigrams_root, *trigram)?;
+    // One trigram at a time: look the current list up, merge, delete +
+    // insert, drop. Materialising every merged blob for the chunk before
+    // writing any (the earlier "phase A / phase B") was a peak-memory
+    // suspect (#3); interleaving costs nothing and removes it.
+    let mut rewritten = 0usize;
+    for (trigram, mut ids) in std::mem::take(pending) {
+        ids.sort_unstable();
+        ids.dedup();
+        let mut current = lookup_postings(cache, trigram)?;
+        let existed = !current.is_empty();
+        if !codec::merge_into(&mut current, &ids) {
+            continue;
+        }
+        let blob = encode_postings_row(&current, cache);
+        drop(current);
+        if existed {
+            delete_row(&mut cache.pager, &header, cache.trigrams_root, trigram)?;
         }
         insert_row(
             &mut cache.pager,
             &header,
             cache.trigrams_root,
-            *trigram,
-            blob,
+            trigram,
+            &blob,
         )?;
+        rewritten = rewritten.saturating_add(1);
     }
-    stats.trigrams_rewritten = stats.trigrams_rewritten.saturating_add(rewrites.len());
+    stats.trigrams_rewritten = stats.trigrams_rewritten.saturating_add(rewritten);
     if last {
         ignore_missing(delete_row(
             &mut cache.pager,
@@ -313,6 +431,7 @@ pub fn update(cache: &mut Cache, root: &Path) -> Result<Stats> {
     let mut next_id = existing.values().map(|f| f.id).max().unwrap_or(0);
     let chunk_files = env_usize(CHUNK_FILES_ENV, DEFAULT_CHUNK_FILES);
     let chunk_bytes = env_usize(CHUNK_BYTES_ENV, DEFAULT_CHUNK_BYTES);
+    let chunk_trigrams = env_usize(CHUNK_TRIGRAMS_ENV, DEFAULT_CHUNK_TRIGRAMS);
 
     let mut file_rows: Vec<(Option<i64>, Option<FileMeta>)> = Vec::new();
     let mut pending: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
@@ -377,7 +496,10 @@ pub fn update(cache: &mut Cache, root: &Path) -> Result<Stats> {
                     pending.entry(t).or_default().push(id);
                 }
             }
-            if file_rows.len() >= chunk_files || pending_bytes >= chunk_bytes {
+            if file_rows.len() >= chunk_files
+                || pending_bytes >= chunk_bytes
+                || pending.len() >= chunk_trigrams
+            {
                 commit_chunk(
                     cache,
                     &mut file_rows,
@@ -498,5 +620,23 @@ fn ignore_missing(r: std::result::Result<(), BtreeError>) -> Result<()> {
     match r {
         Ok(()) | Err(BtreeError::RowidNotFound { .. }) => Ok(()),
         Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn binary_detection_by_content_and_name() {
+        use super::{is_binary, is_binary_name};
+        assert!(!is_binary(b"fn main() {}\n\tlet x = 1;\r\n"));
+        assert!(is_binary(b"abc\0def"));
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        pdf.extend((0u8..200).map(|i| if i % 3 == 0 { 0x01 } else { b'x' }));
+        assert!(is_binary(&pdf));
+        assert!(!is_binary("héllo wörld — ünïcode".as_bytes()));
+        assert!(is_binary_name(std::path::Path::new("x/report.PDF")));
+        assert!(is_binary_name(std::path::Path::new("a.tar.gz")));
+        assert!(!is_binary_name(std::path::Path::new("main.rs")));
+        assert!(!is_binary_name(std::path::Path::new("Makefile")));
     }
 }
