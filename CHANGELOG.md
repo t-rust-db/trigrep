@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.1] - 2026-09-09
+
+- Fix: package metadata said MIT; the repository is Apache-2.0 (as its
+  `LICENSE` file already was). No code change.
+
 ## [0.1.0] - 2026-09-09
 
 Extracted from `t-rust-db/sqlite-rs` (the `sqlgrep` binary, sqlite-rs
