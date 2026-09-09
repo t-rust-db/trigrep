@@ -9,7 +9,8 @@
 //! own VDBE sits on.
 //!
 //! ```text
-//! trigrep [-i] [--rebuild] [-u] <pattern> [path]   search (fast: as the cache stands)
+//! trigrep [-i] [-u] [-f] [--color|--no-color] [--rebuild] <pattern> [path]
+//!                                                  search (fast: as the cache stands)
 //! trigrep index [--rebuild] [path]                 build/update the cache only
 //! trigrep cache-path [path]                        print where the cache file is
 //! ```
@@ -40,6 +41,10 @@ struct Args {
     rebuild: bool,
     case_insensitive: bool,
     update: bool,
+    /// `-f`/`--flatten`: force `path:line:text` even on a terminal (#6).
+    flatten: bool,
+    /// `--color` / `--no-color`; `None` = auto (#7).
+    color: Option<bool>,
     positional: Vec<String>,
 }
 
@@ -48,6 +53,8 @@ fn parse_args() -> Result<Args, String> {
         rebuild: false,
         case_insensitive: false,
         update: false,
+        flatten: false,
+        color: None,
         positional: Vec::new(),
     };
     let mut literal_rest = false;
@@ -58,6 +65,9 @@ fn parse_args() -> Result<Args, String> {
             "--rebuild" => args.rebuild = true,
             "-i" | "--ignore-case" => args.case_insensitive = true,
             "-u" | "--update" => args.update = true,
+            "-f" | "--flatten" => args.flatten = true,
+            "--color" => args.color = Some(true),
+            "--no-color" => args.color = Some(false),
             "-h" | "--help" => return Err(String::new()),
             s if s.starts_with('-') && s.len() > 1 => return Err(format!("unknown flag {s}")),
             _ => args.positional.push(a),
@@ -68,7 +78,7 @@ fn parse_args() -> Result<Args, String> {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: trigrep [-i] [--rebuild] [-u] <pattern> [path]\n       \
+        "usage: trigrep [-i] [-u] [-f] [--color|--no-color] [--rebuild] <pattern> [path]\n       \
          trigrep index [--rebuild] [path]\n       \
          trigrep cache-path [path]"
     );
@@ -194,8 +204,14 @@ fn run_search(args: &Args) -> ExitCode {
         trigrams,
     };
     let stdout = std::io::stdout();
+    let output = search::Output::resolve(
+        std::io::IsTerminal::is_terminal(&stdout),
+        args.flatten,
+        args.color,
+        std::env::var_os("NO_COLOR").is_some(),
+    );
     let mut out = std::io::BufWriter::new(stdout.lock());
-    let matched = match search::run(&cache, &query, &mut out) {
+    let matched = match search::run(&cache, &query, &output, &mut out) {
         Ok(n) => n,
         // A closed pipe (`trigrep ... | head`) is not an error.
         Err(e) if is_broken_pipe(e.as_ref()) => return ExitCode::SUCCESS,

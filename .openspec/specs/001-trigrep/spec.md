@@ -68,9 +68,11 @@ through `db-storage`'s b-tree and pager APIs (no SQL is compiled).
 
 ### Requirement 3: Search prints file:line matches with grep exit codes [MUST]
 
-`trigrep <pattern> [path]` MUST build the cache if absent, then print one
-`path:line:text` line per matching line; exit 0 when something matched, 1
-when nothing did, 2 on error (invalid regex included). Narrowing by
+`trigrep <pattern> [path]` MUST build the cache if absent, then print each
+matching line; exit 0 when something matched, 1 when nothing did, 2 on
+error (invalid regex included). When stdout is not a terminal, or with
+`-f`/`--flatten`, the form MUST be one `path:line:text` line per match
+(Requirement 8 covers the terminal form). Narrowing by
 required literal trigrams MUST never drop a match the regex would find
 (classes, alternations and optional groups contribute no required
 trigrams; `-i` scans every file).
@@ -103,13 +105,22 @@ trigrams; `-i` scans every file).
 
 **Tests:** `tests/unit/trigrep_cli_test.rs::regex_patterns_narrow_by_literals_but_match_by_regex`
 
-### Requirement 4: Incremental update in one transaction [MUST]
+### Requirement 4: Incremental update in bounded chunks [MUST]
 
 `trigrep index` MUST touch only files whose mtime or size changed since the
 last index (re-hashing content to confirm), add new files, and stop
-returning deleted ones; all writes of one invocation MUST be a single
-pager transaction committed by one `flush`. An invocation with nothing
-changed MUST rewrite no posting list.
+returning deleted ones. Writes MUST be committed in windows — every
+`TRIGREP_CHUNK_FILES` files (default 4,000), `TRIGREP_CHUNK_BYTES` of
+pending postings (default 256 MiB) or `TRIGREP_CHUNK_TRIGRAMS` distinct
+pending trigrams (default 1,000,000), whichever comes first — each window
+one pager transaction committed by one `flush` and carrying its file rows
+and the posting lists they touch. A `meta` marker (rowid 2) MUST be present
+from the first window's commit to the last's, and a cache opened with the
+marker present MUST be brought up to date before any search answers from
+it. An invocation with nothing changed MUST rewrite no posting list. File
+reading and hashing MAY run on several threads (`TRIGREP_THREADS`), but
+file ids MUST be assigned in walk order so the resulting cache is
+byte-identical for any thread count.
 
 **Implementation:** `src/bin/trigrep/index.rs::update`
 
@@ -142,7 +153,13 @@ complete on top of it.
 
 **Implementation:** `src/bin/trigrep/index.rs::update`
 
-#### Scenario: kill -9 across the commit window
+#### Scenario: kill -9 across the commit windows
+
+- GIVEN a tree indexed with `TRIGREP_CHUNK_FILES=100`
+- WHEN the indexer is killed at random points
+- THEN every committed prefix is a whole number of windows and a plain search on the half-built cache finishes the build before answering
+
+#### Scenario: kill -9 across the commit window (single window)
 
 - GIVEN a 400-file tree and the measured duration of one full index
 - WHEN the indexer is `kill -9`ed at spread points in the second half of
@@ -213,3 +230,29 @@ file.
 - THEN it finds the match and the cache file exists afterwards
 
 **Tests:** `tests/unit/trigrep_cli_test.rs::first_ever_search_still_builds_the_cache_even_by_default`
+
+### Requirement 8: Terminal output is grouped and coloured; pipes stay flat and plain [MUST]
+
+On a terminal, `trigrep` MUST group hits under one path heading per file
+with hits, print `line:text` beneath, and separate files with a blank line;
+files without hits MUST print nothing. `-f`/`--flatten` MUST force the
+`path:line:text` form on a terminal. Colour (path magenta, line number
+green, every matched span bold red, plain ANSI SGR) MUST be on when stdout
+is a terminal and `NO_COLOR` is unset, off otherwise; `--color` MUST force
+it on and `--no-color` off, both overriding `NO_COLOR` and the terminal
+check. Stripping the escape sequences from coloured output MUST yield the
+plain output byte for byte.
+
+**Implementation:** `src/search.rs::Output`, `src/search.rs::run`
+
+#### Scenario: Pipe, -f, --color, --no-color, NO_COLOR
+
+- GIVEN two files with three matching lines, one line matching twice
+- WHEN run with stdout piped
+- THEN output is flat with no escape sequences, and `-f` produces the same bytes
+- WHEN run with `--color`
+- THEN the path, the line number and both spans on the double-match line carry SGR sequences, and stripping them yields the plain output
+- WHEN run with `--no-color`, or with `NO_COLOR=1` and no flag
+- THEN output equals the plain output; `--color` with `NO_COLOR=1` is still coloured
+
+**Tests:** `tests/cli.rs::output_layout_and_color_flags`, `src/search.rs::tests::output_resolution_follows_the_pipe_convention`, `src/search.rs::tests::every_match_span_is_highlighted`

@@ -460,3 +460,80 @@ fn cache_is_byte_identical_across_thread_counts() {
         "{mismatched} differing bytes between 1-thread and 8-thread caches"
     );
 }
+
+/// #5/#6/#7: a pipe gets the classic flat form with no escapes; `-f` on a
+/// pipe is the same bytes; `--color` adds SGR to path, line number and
+/// every match span; `--no-color` and `NO_COLOR` strip them again.
+#[test]
+fn output_layout_and_color_flags() {
+    let s = scratch("output");
+    s.write("a.txt", "needle one\nplain\nneedle two needle\n");
+    s.write("b.txt", "needle three\n");
+    let run = |args: &[&str], no_color_env: bool| -> String {
+        let mut c = Command::new(SQLGREP);
+        c.env("TRIGREP_CACHE_DIR", &s.cache_dir)
+            .env_remove("NO_COLOR");
+        if no_color_env {
+            c.env("NO_COLOR", "1");
+        }
+        let out = c.args(args).arg(&s.root).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let flat = run(&["needle"], false);
+    assert!(
+        !flat.contains('\x1b'),
+        "piped output must be plain: {flat:?}"
+    );
+    let mut lines: Vec<&str> = flat.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].ends_with("a.txt:1:needle one"), "{lines:?}");
+    assert!(lines[1].ends_with("a.txt:3:needle two needle"), "{lines:?}");
+    assert!(lines[2].ends_with("b.txt:1:needle three"), "{lines:?}");
+    // -f on a pipe: byte-identical to the default piped form.
+    assert_eq!(run(&["-f", "needle"], false), flat);
+    // --color forces SGR even on a pipe: path, line number, both spans on line 3.
+    let colored = run(&["--color", "needle"], false);
+    assert!(
+        colored.contains("\x1b[35m"),
+        "path colour missing: {colored:?}"
+    );
+    assert!(
+        colored.contains("\x1b[32m3\x1b[0m:"),
+        "line-number colour missing: {colored:?}"
+    );
+    let line3 = colored.lines().find(|l| l.contains(" two ")).unwrap();
+    assert_eq!(
+        line3.matches("\x1b[1;31mneedle\x1b[0m").count(),
+        2,
+        "{line3:?}"
+    );
+    // Stripping the escapes gives exactly the plain output.
+    let stripped: String = {
+        let mut out = String::new();
+        let mut it = colored.chars().peekable();
+        while let Some(c) = it.next() {
+            if c == '\x1b' {
+                for d in it.by_ref() {
+                    if d == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    };
+    assert_eq!(stripped, flat);
+    // --no-color and NO_COLOR=1 win over auto; --color wins over NO_COLOR.
+    assert_eq!(run(&["--no-color", "needle"], false), flat);
+    assert_eq!(run(&["needle"], true), flat);
+    assert!(run(&["--color", "needle"], true).contains("\x1b[35m"));
+}
