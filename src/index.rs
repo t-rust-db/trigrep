@@ -63,7 +63,15 @@ fn int(v: Option<&Value>) -> i64 {
 }
 
 fn decode_file(rowid: i64, payload: &[u8], cache: &Cache) -> Result<FileMeta> {
-    let v = decode_record(payload, cache.header.text_encoding)?;
+    decode_file_enc(rowid, payload, cache.header.text_encoding)
+}
+
+fn decode_file_enc(
+    rowid: i64,
+    payload: &[u8],
+    enc: db_storage::row::record::TextEncoding,
+) -> Result<FileMeta> {
+    let v = decode_record(payload, enc)?;
     Ok(FileMeta {
         id: rowid,
         path: text(v.first()),
@@ -74,6 +82,10 @@ fn decode_file(rowid: i64, payload: &[u8], cache: &Cache) -> Result<FileMeta> {
 }
 
 fn encode_file(f: &FileMeta, cache: &Cache) -> Vec<u8> {
+    encode_file_enc(f, cache.header.text_encoding)
+}
+
+fn encode_file_enc(f: &FileMeta, enc: db_storage::row::record::TextEncoding) -> Vec<u8> {
     encode_record(
         &[
             Value::Text(f.path.as_str().into()),
@@ -81,7 +93,7 @@ fn encode_file(f: &FileMeta, cache: &Cache) -> Vec<u8> {
             Value::Integer(f.size),
             Value::Integer(f.hash),
         ],
-        cache.header.text_encoding,
+        enc,
     )
 }
 
@@ -314,8 +326,12 @@ fn scan_one(root: &Path, entry: crate::walk::Entry, old: Option<&FileMeta>) -> S
     }
     let mtime = mtime_nanos(&meta);
     let size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
+    // mtime 0 is the "mtime unavailable" fallback (pre-1970, or past the
+    // i64 nanosecond range); two different contents of equal size would
+    // otherwise be "unchanged by stat" forever (#14) — so 0 never short-
+    // circuits, the content is hashed.
     if let Some(old) = old {
-        if old.mtime == mtime && old.size == size {
+        if mtime != 0 && old.mtime == mtime && old.size == size {
             // Unchanged by stat: keep the stored hash, no content read.
             return Scanned {
                 rel,
@@ -464,7 +480,7 @@ pub fn update(cache: &mut Cache, root: &Path) -> Result<Stats> {
                 continue;
             };
             if let Some(old) = old {
-                if old.mtime == mtime && old.size == size {
+                if mtime != 0 && old.mtime == mtime && old.size == size {
                     stats.unchanged = stats.unchanged.saturating_add(1);
                     continue;
                 }
@@ -625,6 +641,40 @@ fn ignore_missing(r: std::result::Result<(), BtreeError>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_row_round_trips_including_odd_paths() {
+        use super::{decode_file_enc, encode_file_enc, FileMeta};
+        use db_storage::row::header::{DatabaseHeader, DEFAULT_PAGE_SIZE};
+        let page1 = DatabaseHeader::new_empty_page1(DEFAULT_PAGE_SIZE);
+        let header = DatabaseHeader::parse(&page1[..100]).unwrap();
+        for path in [
+            "a.txt",
+            "dir/sub/x y.rs",
+            "ünïcode/文件.md",
+            "",
+            "with:colon",
+        ] {
+            let f = FileMeta {
+                id: 7,
+                path: path.to_string(),
+                mtime: -1,
+                size: i64::MAX,
+                hash: i64::MIN,
+            };
+            let bytes = encode_file_enc(&f, header.text_encoding);
+            let back = decode_file_enc(7, &bytes, header.text_encoding).unwrap();
+            assert_eq!(
+                (
+                    back.id,
+                    back.path.as_str(),
+                    back.mtime,
+                    back.size,
+                    back.hash
+                ),
+                (7, path, -1, i64::MAX, i64::MIN)
+            );
+        }
+    }
     #[test]
     fn binary_detection_by_content_and_name() {
         use super::{is_binary, is_binary_name};

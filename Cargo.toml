@@ -26,6 +26,8 @@ regex-syntax = "0.8"
 dirs = "5"
 
 [dev-dependencies]
+# Property tests only (#14): never in the shipped binary's closure.
+proptest = "1"
 db-storage = { version = "0.6.3", git = "https://github.com/t-rust-db/db-storage", tag = "v0.6.3", default-features = false, features = ["row", "test-support"] }
 
 [profile.release]

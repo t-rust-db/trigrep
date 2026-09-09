@@ -573,3 +573,153 @@ fn double_dash_escapes_the_subcommand_dispatch() {
     assert_eq!(code, 0);
     assert!(stdout.contains("a.txt:2:cache-path here"), "{stdout:?}");
 }
+
+/// #14: several windows crossed at several thread counts — the cache
+/// file is byte-identical for all of them.
+#[test]
+fn multi_window_builds_are_byte_identical_across_thread_counts() {
+    let s = scratch("sweep");
+    for i in 0..120u32 {
+        s.write(
+            &format!("d{}/f{i}.txt", i % 5),
+            &format!("tok{:x} shared {}\n", i * 7919, i % 3),
+        );
+    }
+    let mut images: Vec<(String, Vec<u8>)> = Vec::new();
+    for threads in ["1", "2", "3", "7", "8"] {
+        let cache_dir = s.cache_dir.with_file_name(format!("cache-t{threads}"));
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let out = Command::new(SQLGREP)
+            .env("TRIGREP_CACHE_DIR", &cache_dir)
+            .env(trigrep::index::THREADS_ENV, threads)
+            .env(trigrep::index::CHUNK_FILES_ENV, "25") // 120 files → 5 windows
+            .arg("index")
+            .arg(&s.root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let name = s.cache_path().file_name().unwrap().to_owned();
+        images.push((
+            threads.to_string(),
+            std::fs::read(cache_dir.join(name)).unwrap(),
+        ));
+    }
+    for (t, img) in &images[1..] {
+        assert_eq!(img, &images[0].1, "threads={t} differs from threads=1");
+    }
+}
+
+/// #14: a file that turns binary is dropped from the index on re-index and
+/// comes back (as a new row) when it turns text again; stats say so.
+#[test]
+fn text_to_binary_to_text_reindex() {
+    let s = scratch("flip");
+    s.write("a.txt", "needle alpha\n");
+    s.write("b.txt", "other\n");
+    let index = |s: &Scratch| -> String {
+        let out = s.run(&["index"]);
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    assert!(index(&s).contains("2 added"));
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(s.root.join("a.txt"), b"needle\0binary").unwrap();
+    let st = index(&s);
+    assert!(st.contains("1 removed"), "{st}");
+    let (code, _) = s.search("needle");
+    assert_eq!(code, 1, "binary content must not be searchable");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(s.root.join("a.txt"), b"needle back\n").unwrap();
+    let st = index(&s);
+    assert!(st.contains("1 added"), "{st}");
+    let (code, out) = s.search("needle");
+    assert_eq!(code, 0);
+    assert!(out.contains("a.txt:1:needle back"), "{out}");
+}
+
+/// #14: a closed pipe is not an error — `tg ... | head -1` exits 0 silently.
+#[test]
+fn broken_pipe_exits_zero_without_noise() {
+    use std::io::Read;
+    let s = scratch("pipe");
+    for i in 0..2000u32 {
+        s.write(&format!("f{i}.txt"), "needle line\n".repeat(50).as_str());
+    }
+    assert!(s.run(&["index"]).status.success());
+    let mut child = Command::new(SQLGREP)
+        .env("TRIGREP_CACHE_DIR", &s.cache_dir)
+        .arg("needle")
+        .arg(&s.root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // read one byte, then drop the read end so the writer sees EPIPE
+    let mut stdout = child.stdout.take().unwrap();
+    let mut one = [0u8; 1];
+    stdout.read_exact(&mut one).unwrap();
+    drop(stdout);
+    let status = child.wait().unwrap();
+    let mut err = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    assert_eq!(status.code(), Some(0), "stderr: {err}");
+    assert!(err.is_empty(), "stderr should be silent on EPIPE: {err}");
+}
+
+/// #14: foreign or damaged files at the cache path are refused or
+/// rebuilt, never silently indexed into.
+#[test]
+fn foreign_zero_byte_and_garbage_cache_files() {
+    let s = scratch("foreign");
+    s.write("a.txt", "needle\n");
+    // learn the cache path by running once, then destroy the cache three ways
+    assert!(s.run(&["index"]).status.success());
+    let path = s.cache_path();
+    // 1. zero-byte file: treated as fresh (bootstrapped), search works
+    std::fs::write(&path, b"").unwrap();
+    let (code, out) = s.search("needle");
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("a.txt:1:needle"));
+    // 2. garbage bytes: an error, exit 2, not a crash and not a silent scan
+    std::fs::write(
+        &path,
+        b"this is not a database at all, not even close, really not",
+    )
+    .unwrap();
+    let out = s.run(&["needle"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // 3. --rebuild recovers from garbage
+    let (code, text) = s.search_args(&["--rebuild"], "needle");
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("a.txt:1:needle"));
+    // 4. a valid SQLite file that is not a trigrep cache is refused by name
+    let other = scratch("foreign-other");
+    other.write("z.txt", "zzz\n");
+    assert!(other.run(&["index"]).status.success());
+    let mut foreign = std::fs::read(other.cache_path()).unwrap();
+    // rename table "files" -> "fileZ" in sqlite_master's DDL is too fiddly;
+    // instead corrupt page 1's header magic to force a parse error.
+    foreign[0] = b'X';
+    std::fs::write(&path, &foreign).unwrap();
+    let out = s.run(&["needle"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

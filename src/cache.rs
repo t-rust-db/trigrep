@@ -117,7 +117,13 @@ pub fn open(root: &Path, rebuild: bool) -> Result<(Cache, bool)> {
         journal.push("-journal");
         remove_if_exists(Path::new(&journal))?;
     }
-    if !matches!(UnixVfs.exists(&path), Ok(true)) {
+    // Absent, or present but empty (SQLite's own rule: a zero-byte file is
+    // a valid empty database, #14): write the empty page-1 image so the
+    // pager has a header to open.
+    let empty = std::fs::metadata(&path)
+        .map(|m| m.len() == 0)
+        .unwrap_or(true);
+    if empty {
         let file = UnixVfs.create_or_open_write(&path)?;
         file.write_at(&DatabaseHeader::new_empty_page1(DEFAULT_PAGE_SIZE), 0)?;
         file.sync()?;

@@ -190,6 +190,41 @@ pub fn merge_into(into: &mut Vec<i64>, add: &[i64]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
+    proptest! {
+        /// #14: encode→decode is the identity on any sorted, unique, positive id list.
+        #[test]
+        fn postings_round_trip(mut ids in proptest::collection::vec(1i64..=(1i64 << 40), 0..200)) {
+            ids.sort_unstable();
+            ids.dedup();
+            let blob = super::encode_postings(&ids);
+            prop_assert_eq!(super::decode_postings(&blob).unwrap(), ids);
+        }
+
+        /// #14: decoding arbitrary bytes never panics — it returns Ok or a CodecError.
+        #[test]
+        fn decode_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
+            let _ = super::decode_postings(&bytes);
+        }
+
+        /// #14: the two unique_trigrams strategies agree on both sides of the
+        /// 256 KiB threshold, for dense and sparse alphabets and tiny inputs.
+        #[test]
+        fn unique_trigrams_strategies_agree(
+            len in prop_oneof![0usize..8, (256usize << 10) - 4..(256usize << 10) + 4, 300usize << 10..(300usize << 10) + 2],
+            alphabet in 1u8..=255,
+            seed in any::<u64>(),
+        ) {
+            let mut x = seed | 1;
+            let bytes: Vec<u8> = (0..len).map(|_| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; (x % u64::from(alphabet)) as u8 }).collect();
+            let got = super::unique_trigrams(&bytes);
+            let mut want: Vec<i64> = bytes.windows(3).map(|w| super::pack([w[0], w[1], w[2]])).collect();
+            want.sort_unstable();
+            want.dedup();
+            prop_assert_eq!(got, want);
+        }
+    }
     #[test]
     fn tenth_varint_byte_with_high_payload_bits_is_overlong() {
         // nine continuation bytes (shift reaches 63), then 0x7e: bits 1-6 set.

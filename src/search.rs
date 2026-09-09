@@ -268,6 +268,73 @@ pub fn run(cache: &Cache, q: &Query<'_>, o: &Output, out: &mut impl Write) -> Re
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
+    /// #14, the property the whole index rests on: if the regex matches a
+    /// text, every required trigram of the pattern occurs in that text —
+    /// so narrowing by required trigrams can never drop a matching file.
+    fn pattern_strategy() -> impl Strategy<Value = String> {
+        let atom = prop_oneof![
+            "[a-c]{1,4}".prop_map(|s| s),
+            Just("[ab]".to_string()),
+            Just("(ab|bc)".to_string()),
+            Just("a?".to_string()),
+            Just("b+".to_string()),
+            Just("c*".to_string()),
+            Just("(?:abc)".to_string()),
+            Just("\\b".to_string()),
+            Just("^".to_string()),
+            Just(".".to_string()),
+        ];
+        proptest::collection::vec(atom, 1..5).prop_map(|v| v.concat())
+    }
+
+    proptest! {
+        #[test]
+        fn required_trigrams_never_exclude_a_match(
+            pat in pattern_strategy(),
+            text in "[a-c \\n]{0,40}",
+        ) {
+            let re = regex::bytes::Regex::new(&pat).unwrap();
+            let req = super::required_trigrams(&pat, false).unwrap();
+            if re.is_match(text.as_bytes()) {
+                if let Some(trigrams) = req {
+                    let present = super::super::codec::unique_trigrams(text.as_bytes());
+                    for t in trigrams {
+                        prop_assert!(present.binary_search(&t).is_ok(),
+                            "pattern {pat:?} matches {text:?} but required trigram {t} is absent");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn painter_handles_empty_matches_whole_line_and_non_utf8() {
+        use super::{Color, Layout, Output, Regex};
+        let o = Output {
+            layout: Layout::Flat,
+            color: Color::On,
+        };
+        let mut buf = Vec::new();
+        // empty-width matches paint nothing and do not loop or drop bytes
+        o.line(&mut buf, &Regex::new("x*").unwrap(), b"abc")
+            .unwrap();
+        assert_eq!(buf, b"abc");
+        buf.clear();
+        o.line(&mut buf, &Regex::new("^").unwrap(), b"abc").unwrap();
+        assert_eq!(buf, b"abc");
+        // whole-line match is one span
+        buf.clear();
+        o.line(&mut buf, &Regex::new("abc").unwrap(), b"abc")
+            .unwrap();
+        assert_eq!(buf, b"\x1b[1;31mabc\x1b[0m");
+        // non-UTF-8 bytes pass through untouched around a span
+        buf.clear();
+        o.line(&mut buf, &Regex::new("b").unwrap(), b"\xffab\xfe")
+            .unwrap();
+        assert_eq!(buf, b"\xffa\x1b[1;31mb\x1b[0m\xfe");
+    }
 
     #[test]
     fn output_resolution_follows_the_pipe_convention() {
