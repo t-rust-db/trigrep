@@ -24,4 +24,4 @@ wildcards = "deny"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = ["https://github.com/t-rust-db/db-storage"]
+allow-git = ["https://github.com/t-rust-db/db-storage", "https://github.com/t-rust-db/db-core"]
