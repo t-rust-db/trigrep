@@ -137,6 +137,11 @@ pub fn decode_postings(buf: &[u8]) -> Result<Vec<i64>, CodecError> {
             if shift >= 64 {
                 return Err(CodecError::Overlong);
             }
+            // The 10th byte sits at shift 63: only its low bit fits a u64.
+            // Any higher payload bit would be shifted out silently (#13).
+            if shift == 63 && byte & 0x7e != 0 {
+                return Err(CodecError::Overlong);
+            }
             gap |= u64::from(byte & 0x7f) << shift;
             if byte & 0x80 == 0 {
                 break;
@@ -185,6 +190,24 @@ pub fn merge_into(into: &mut Vec<i64>, add: &[i64]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tenth_varint_byte_with_high_payload_bits_is_overlong() {
+        // nine continuation bytes (shift reaches 63), then 0x7e: bits 1-6 set.
+        let mut buf = vec![0x80u8; 9];
+        buf.push(0x7e);
+        assert_eq!(
+            super::decode_postings(&buf),
+            Err(super::CodecError::Overlong)
+        );
+        // ...whereas a tenth byte of exactly 0x01 is the legal top bit.
+        let mut ok = vec![0x80u8; 9];
+        ok.push(0x01);
+        // 1 << 63 does not fit i64 → Overflow, never a silent wrong id.
+        assert_eq!(
+            super::decode_postings(&ok),
+            Err(super::CodecError::Overflow)
+        );
+    }
     #[test]
     fn bitmap_and_collect_paths_agree_on_large_input() {
         // Deterministic pseudo-random bytes past the bitmap threshold.
