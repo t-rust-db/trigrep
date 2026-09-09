@@ -47,11 +47,21 @@ latency. `-u`/`--update` asks for the refresh; `tg index` does it explicitly.
 
 Inside a git work tree `.gitignore` is honoured via `git ls-files
 --exclude-standard` (git is a runtime dependency there); outside, a plain walk
-that skips `.git` and never follows symlinks. Binaries — a NUL or more than
-5% control bytes in the first 8 KiB, or a known binary extension (pdf,
-images, archives, fonts, media, objects, office documents) — symlinks and
-files over 64 MiB are skipped. Exit codes follow grep:
-0 matched, 1 nothing, 2 error.
+that skips `.git` and never follows symlinks, and skips (with a count
+reported, "N unreadable skipped") rather than aborts on a subdirectory or
+entry it cannot read — the root itself failing to open is still a real
+error. Binaries — a NUL or more than 5% control bytes in the first 8 KiB, or
+a known binary extension (pdf, images, archives, fonts, media, objects,
+office documents) — symlinks and files over 64 MiB are skipped. Exit codes
+follow grep: 0 matched, 1 nothing, 2 error.
+
+The cache is addressed by a hash of the canonicalized root path; on every
+open its stored root is checked against the one asked for, and a mismatch
+(a copied cache directory, in principle a hash collision) triggers a rebuild
+rather than risking wrong results. Two `tg` processes racing the same root's
+first-ever index are safe: the initial bootstrap is guarded by an exclusive
+lock, and the CLI retries (bounded, exponential backoff) on the two
+transient errors that racing a bootstrap can still produce.
 
 The cache lives at `$TRIGREP_CACHE_DIR/<key>.db`, or by default
 `~/.cache/trigrep/` on Linux and `~/Library/Caches/trigrep/` on macOS, one
