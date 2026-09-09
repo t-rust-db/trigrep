@@ -22,8 +22,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
-use db_storage::row::btree::{delete_row, insert_row, BtreeError, TableCursor};
-use db_storage::row::record::{decode_record, encode_record, Value};
+use db_core::storage::row::btree::{delete_row, insert_row, BtreeError, TableCursor};
+use db_core::storage::row::record::{decode_record, encode_record, Value};
 
 use crate::cache::{fnv1a64, Cache, Result, MAX_FILE_SIZE};
 use crate::codec;
@@ -73,7 +73,7 @@ fn decode_file(rowid: i64, payload: &[u8], cache: &Cache) -> Result<FileMeta> {
 fn decode_file_enc(
     rowid: i64,
     payload: &[u8],
-    enc: db_storage::row::record::TextEncoding,
+    enc: db_core::storage::row::record::TextEncoding,
 ) -> Result<FileMeta> {
     let v = decode_record(payload, enc)?;
     Ok(FileMeta {
@@ -89,7 +89,7 @@ fn encode_file(f: &FileMeta, cache: &Cache) -> Vec<u8> {
     encode_file_enc(f, cache.header.text_encoding)
 }
 
-fn encode_file_enc(f: &FileMeta, enc: db_storage::row::record::TextEncoding) -> Vec<u8> {
+fn encode_file_enc(f: &FileMeta, enc: db_core::storage::row::record::TextEncoding) -> Vec<u8> {
     encode_record(
         &[
             Value::Text(f.path.as_str().into()),
@@ -831,7 +831,7 @@ mod tests {
     #[test]
     fn file_row_round_trips_including_odd_paths() {
         use super::{decode_file_enc, encode_file_enc, FileMeta};
-        use db_storage::row::header::{DatabaseHeader, DEFAULT_PAGE_SIZE};
+        use db_core::storage::row::header::{DatabaseHeader, DEFAULT_PAGE_SIZE};
         let page1 = DatabaseHeader::new_empty_page1(DEFAULT_PAGE_SIZE);
         let header = DatabaseHeader::parse(&page1[..100]).unwrap();
         for path in [

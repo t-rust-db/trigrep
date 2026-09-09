@@ -13,10 +13,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use db_storage::row::btree::{count_table_rows, TableCursor};
-use db_storage::row::integrity::run_integrity_check;
-use db_storage::row::schema::read_schema;
-use db_storage::row::vfs::UnixVfs;
+use db_core::storage::row::btree::{count_table_rows, TableCursor};
+use db_core::storage::row::integrity::run_integrity_check;
+use db_core::storage::row::schema::read_schema;
+use db_core::storage::row::vfs::UnixVfs;
 use trigrep::cache::open_db;
 
 const TG: &str = env!("CARGO_BIN_EXE_tg");

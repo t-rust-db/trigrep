@@ -75,7 +75,7 @@
     "id": "cache_212",
     "file": "src/cache.rs",
     "line": 212,
-    "decision": "match record.get(1) {\n        Some(db_storage::row::record::Value::Text(t)) => Ok(Some(t.to_string())),\n        _ => Ok(None),\n    }",
+    "decision": "match record.get(1) {\n        Some(db_core::storage::row::record::Value::Text(t)) => Ok(Some(t.to_string())),\n        _ => Ok(None),\n    }",
     "conditions": 0,
     "vectors_required": 0,
     "compiler_void": true

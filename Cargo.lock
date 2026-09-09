@@ -46,17 +46,8 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "db-core"
-version = "0.71.1"
-source = "git+https://github.com/t-rust-db/db-core?tag=v0.71.1#f45e8a2839f9cfbdaaeed1dcb78658764610f47b"
-
-[[package]]
-name = "db-storage"
-version = "0.6.4"
-dependencies = [
- "db-core",
- "memmap2",
- "ruzstd",
-]
+version = "0.78.1"
+source = "git+https://github.com/t-rust-db/db-core?tag=v0.78.1#f9ccaf93e549f9dbb605ccc8d7905f7be4b02971"
 
 [[package]]
 name = "dirs"
@@ -161,15 +152,6 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
-
-[[package]]
-name = "memmap2"
-version = "0.9.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "num-traits"
@@ -360,21 +342,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ruzstd"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fad02996bfc73da3e301efe90b1837be9ed8f4a462b6ed410aa35d00381de89f"
-dependencies = [
- "twox-hash",
-]
-
-[[package]]
-name = "static_assertions"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -420,23 +387,13 @@ dependencies = [
 
 [[package]]
 name = "trigrep"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
- "db-storage",
+ "db-core",
  "dirs",
  "proptest",
  "regex",
  "regex-syntax",
-]
-
-[[package]]
-name = "twox-hash"
-version = "1.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
-dependencies = [
- "cfg-if",
- "static_assertions",
 ]
 
 [[package]]
