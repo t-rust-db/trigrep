@@ -537,3 +537,39 @@ fn output_layout_and_color_flags() {
     assert_eq!(run(&["needle"], true), flat);
     assert!(run(&["--color", "needle"], true).contains("\x1b[35m"));
 }
+
+/// #11: a file ending in a newline has no phantom empty last line, so
+/// patterns that match the empty string report exactly the real lines.
+#[test]
+fn empty_matching_patterns_do_not_report_a_phantom_trailing_line() {
+    let s = scratch("phantom");
+    s.write("nl.txt", "one\ntwo\n");
+    s.write("nonl.txt", "one\ntwo");
+    s.write("empty.txt", "");
+    for pat in ["^", "x*", "o"] {
+        let (code, stdout) = s.search(pat);
+        assert_eq!(code, 0, "{pat}");
+        let mut lines: Vec<&str> = stdout.lines().collect();
+        lines.sort_unstable();
+        // nl.txt and nonl.txt have two real lines each; empty.txt none.
+        assert_eq!(lines.len(), 4, "pattern {pat:?}: {lines:?}");
+        assert!(
+            lines.iter().all(|l| l.contains(":1:") || l.contains(":2:")),
+            "{lines:?}"
+        );
+    }
+}
+
+/// #12: `--` ends flag parsing *and* subcommand dispatch — `tg -- index`
+/// greps for the word "index" instead of running the indexer.
+#[test]
+fn double_dash_escapes_the_subcommand_dispatch() {
+    let s = scratch("dashdash");
+    s.write("a.txt", "the index of things\ncache-path here\n");
+    let (code, stdout) = s.search_args(&["--"], "index");
+    assert_eq!(code, 0);
+    assert!(stdout.contains("a.txt:1:the index of things"), "{stdout:?}");
+    let (code, stdout) = s.search_args(&["--"], "cache-path");
+    assert_eq!(code, 0);
+    assert!(stdout.contains("a.txt:2:cache-path here"), "{stdout:?}");
+}
