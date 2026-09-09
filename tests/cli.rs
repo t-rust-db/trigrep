@@ -419,3 +419,121 @@ fn mixed_size_posting_lists_split_correctly() {
     );
     assert_cache_healthy(&s.cache_path());
 }
+
+/// #4: reading/hashing runs on a thread pool, but ids are assigned in
+/// path order by the caller, so indexing the *same* tree into two caches
+/// with different thread counts must produce byte-identical files.
+#[test]
+fn cache_is_byte_identical_across_thread_counts() {
+    let s = scratch("threads");
+    for i in 0..300u32 {
+        let body: String = (0..40u32)
+            .map(|j| format!("tok{:x} ", u64::from(i) * 7919 + u64::from(j) * 104_729))
+            .collect();
+        s.write(&format!("d{}/f{i}.txt", i % 7), &body);
+    }
+    let other_cache = s.cache_dir.with_file_name("cache-8threads");
+    std::fs::create_dir_all(&other_cache).unwrap();
+    let run = |cache_dir: &Path, threads: &str| {
+        let out = Command::new(SQLGREP)
+            .env("TRIGREP_CACHE_DIR", cache_dir)
+            .env(trigrep::index::THREADS_ENV, threads)
+            .arg("index")
+            .arg(&s.root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run(&s.cache_dir, "1");
+    run(&other_cache, "8");
+    let a = std::fs::read(s.cache_path()).unwrap();
+    let name = s.cache_path().file_name().unwrap().to_owned();
+    let b = std::fs::read(other_cache.join(name)).unwrap();
+    assert_eq!(a.len(), b.len(), "cache sizes differ");
+    let mismatched = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+    assert_eq!(
+        mismatched, 0,
+        "{mismatched} differing bytes between 1-thread and 8-thread caches"
+    );
+}
+
+/// #5/#6/#7: a pipe gets the classic flat form with no escapes; `-f` on a
+/// pipe is the same bytes; `--color` adds SGR to path, line number and
+/// every match span; `--no-color` and `NO_COLOR` strip them again.
+#[test]
+fn output_layout_and_color_flags() {
+    let s = scratch("output");
+    s.write("a.txt", "needle one\nplain\nneedle two needle\n");
+    s.write("b.txt", "needle three\n");
+    let run = |args: &[&str], no_color_env: bool| -> String {
+        let mut c = Command::new(SQLGREP);
+        c.env("TRIGREP_CACHE_DIR", &s.cache_dir)
+            .env_remove("NO_COLOR");
+        if no_color_env {
+            c.env("NO_COLOR", "1");
+        }
+        let out = c.args(args).arg(&s.root).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let flat = run(&["needle"], false);
+    assert!(
+        !flat.contains('\x1b'),
+        "piped output must be plain: {flat:?}"
+    );
+    let mut lines: Vec<&str> = flat.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].ends_with("a.txt:1:needle one"), "{lines:?}");
+    assert!(lines[1].ends_with("a.txt:3:needle two needle"), "{lines:?}");
+    assert!(lines[2].ends_with("b.txt:1:needle three"), "{lines:?}");
+    // -f on a pipe: byte-identical to the default piped form.
+    assert_eq!(run(&["-f", "needle"], false), flat);
+    // --color forces SGR even on a pipe: path, line number, both spans on line 3.
+    let colored = run(&["--color", "needle"], false);
+    assert!(
+        colored.contains("\x1b[35m"),
+        "path colour missing: {colored:?}"
+    );
+    assert!(
+        colored.contains("\x1b[32m3\x1b[0m:"),
+        "line-number colour missing: {colored:?}"
+    );
+    let line3 = colored.lines().find(|l| l.contains(" two ")).unwrap();
+    assert_eq!(
+        line3.matches("\x1b[1;31mneedle\x1b[0m").count(),
+        2,
+        "{line3:?}"
+    );
+    // Stripping the escapes gives exactly the plain output.
+    let stripped: String = {
+        let mut out = String::new();
+        let mut it = colored.chars().peekable();
+        while let Some(c) = it.next() {
+            if c == '\x1b' {
+                for d in it.by_ref() {
+                    if d == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    };
+    assert_eq!(stripped, flat);
+    // --no-color and NO_COLOR=1 win over auto; --color wins over NO_COLOR.
+    assert_eq!(run(&["--no-color", "needle"], false), flat);
+    assert_eq!(run(&["needle"], true), flat);
+    assert!(run(&["--color", "needle"], true).contains("\x1b[35m"));
+}

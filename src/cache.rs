@@ -66,7 +66,14 @@ pub struct Cache {
     pub pager: Pager,
     pub files_root: u32,
     pub trigrams_root: u32,
+    pub meta_root: u32,
 }
+
+/// `meta` rowid of the "an update is in progress" marker (#3). Present
+/// between the first chunk commit of an update and its last; a cache that
+/// still has it on open was killed mid-update and must be brought up to
+/// date before it is searched, even without `-u`.
+pub const META_INCOMPLETE_ROWID: i64 = 2;
 
 /// 64-bit FNV-1a: the content hash in `files` and the cache-file name.
 /// Not cryptographic and not meant to be — it only has to notice that
@@ -118,15 +125,21 @@ pub fn open(root: &Path, rebuild: bool) -> Result<(Cache, bool)> {
 
     let (header, mut pager) = open_db(&UnixVfs, &path)?;
     let roots = read_roots(&pager, &header)?;
-    let (files_root, trigrams_root, fresh) = match roots {
-        Some((f, t)) => (f, t, false),
+    let (files_root, trigrams_root, meta_root, mut fresh) = match roots {
+        Some((f, t, m)) => (f, t, m, false),
         None => {
             bootstrap(&mut pager, &header, root)?;
-            let (f, t) =
+            let (f, t, m) =
                 read_roots(&pager, &header)?.ok_or("cache bootstrap left no schema behind")?;
-            (f, t, true)
+            (f, t, m, true)
         }
     };
+    if !fresh {
+        // A killed chunked update (#3) leaves the marker behind: treat the
+        // cache as needing its first scan, never search it as it stands.
+        let mut cur = TableCursor::new(&pager, &header, meta_root);
+        fresh = cur.seek_row(META_INCOMPLETE_ROWID)?.is_some();
+    }
     Ok((
         Cache {
             path,
@@ -134,6 +147,7 @@ pub fn open(root: &Path, rebuild: bool) -> Result<(Cache, bool)> {
             pager,
             files_root,
             trigrams_root,
+            meta_root,
         },
         fresh,
     ))
@@ -150,7 +164,7 @@ fn remove_if_exists(path: &Path) -> Result<()> {
 /// `(files, trigrams)` root pages (`meta` is checked but never read back), or `None` for a fresh file.
 /// A file with *some* of the tables is neither — it is a foreign or
 /// damaged database and refusing beats silently indexing into it.
-fn read_roots(pager: &Pager, header: &DatabaseHeader) -> Result<Option<(u32, u32)>> {
+fn read_roots(pager: &Pager, header: &DatabaseHeader) -> Result<Option<(u32, u32, u32)>> {
     let mut cursor = TableCursor::new(pager, header, 1);
     let schemas = read_schema(&mut cursor, header.text_encoding)?;
     if schemas.is_empty() {
@@ -163,8 +177,11 @@ fn read_roots(pager: &Pager, header: &DatabaseHeader) -> Result<Option<(u32, u32
             .map(|s| s.root_page)
             .ok_or_else(|| format!("not a trigrep cache: table {name:?} missing").into())
     };
-    root_of("meta")?;
-    Ok(Some((root_of("files")?, root_of("trigrams")?)))
+    Ok(Some((
+        root_of("files")?,
+        root_of("trigrams")?,
+        root_of("meta")?,
+    )))
 }
 
 /// One transaction: three empty table roots, their `sqlite_master`

@@ -19,10 +19,10 @@ use db_storage::row::schema::read_schema;
 use db_storage::row::vfs::UnixVfs;
 use trigrep::cache::open_db;
 
-const SQLGREP: &str = env!("CARGO_BIN_EXE_tg");
+const TG: &str = env!("CARGO_BIN_EXE_tg");
 
 fn iterations() -> u32 {
-    std::env::var("SQLGREP_TORTURE_ITERATIONS")
+    std::env::var("TRIGREP_TORTURE_ITERATIONS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(12)
@@ -57,9 +57,16 @@ fn scratch() -> (PathBuf, PathBuf) {
     (root, cache)
 }
 
+/// The first token of f399.txt, as `scratch()` generates it.
+fn needle_in_last_file() -> String {
+    let tok = 399u64.wrapping_mul(1_000_003);
+    format!("{tok:x} ")
+}
+
 fn indexer(root: &Path, cache: &Path) -> Command {
-    let mut c = Command::new(SQLGREP);
-    c.env("TRIGREP_CACHE_DIR", cache)
+    let mut c = Command::new(TG);
+    c.env(trigrep::index::CHUNK_FILES_ENV, "100")
+        .env("TRIGREP_CACHE_DIR", cache)
         .arg("index")
         .arg(root)
         .stdout(Stdio::null())
@@ -134,10 +141,38 @@ fn kill_9_mid_index_always_leaves_a_consistent_cache() {
         } else {
             saw_full = saw_full.saturating_add(1);
         }
+        // Chunked commits (#3): every committed prefix is a whole number
+        // of 100-file windows, never a torn one.
         assert!(
-            n == 0 || n == total,
-            "iteration {i} (killed at {delay:?}): {n} of {total} files committed — partial state"
+            n % 100 == 0 || n == total,
+            "iteration {i} (killed at {delay:?}): {n} of {total} files committed — torn chunk"
         );
+        if n > 0 && n < total {
+            // A cache killed between chunks carries the in-progress marker,
+            // so a plain search (no -u) must finish the update first rather
+            // than answer from the partial index: f399 is always in the
+            // last window.
+            let out = Command::new(TG)
+                .env(trigrep::cache::CACHE_DIR_ENV, &cache)
+                .env(trigrep::index::CHUNK_FILES_ENV, "100")
+                .arg(needle_in_last_file())
+                .arg(&root)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .unwrap();
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "iteration {i}: search on a half-built cache did not resume the build: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                recovered_file_count(&db),
+                total,
+                "iteration {i}: marker not honoured"
+            );
+        }
         if journal.exists() {
             let size = std::fs::metadata(&journal).unwrap().len();
             assert_eq!(

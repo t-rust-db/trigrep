@@ -29,7 +29,17 @@ tg -u 'fn insert_row' .     # refresh the cache first — slower, catches recent
 tg index .                  # bring the cache up to date without searching
 tg index --rebuild .        # start over (also compacts stale postings)
 tg cache-path .             # where this root's cache file lives
+tg -f 'needle' .            # force flat path:line:text on a terminal
+tg --color 'needle' . | less -R   # keep colour through a pipe; --no-color / NO_COLOR turn it off
 ```
+
+On a terminal hits are grouped ripgrep-style — one path heading per file,
+`line:text` beneath, a blank line between files — with the path in magenta,
+line numbers in green and every matched span in bold red. Piped output is
+the flat `path:line:text` form with no escape codes, so `| head` and
+`| xargs` keep working; `-f`/`--flatten` forces that form on a terminal,
+`--color` forces colour on (for `less -R`), `--no-color` or `NO_COLOR` forces
+it off.
 
 A plain search never re-scans the filesystem when a cache already exists:
 on a large, mostly static tree the per-file `stat` used to dominate query
@@ -37,8 +47,10 @@ latency. `-u`/`--update` asks for the refresh; `tg index` does it explicitly.
 
 Inside a git work tree `.gitignore` is honoured via `git ls-files
 --exclude-standard` (git is a runtime dependency there); outside, a plain walk
-that skips `.git` and never follows symlinks. Binaries (NUL in the first
-8 KiB), symlinks and files over 64 MiB are skipped. Exit codes follow grep:
+that skips `.git` and never follows symlinks. Binaries — a NUL or more than
+5% control bytes in the first 8 KiB, or a known binary extension (pdf,
+images, archives, fonts, media, objects, office documents) — symlinks and
+files over 64 MiB are skipped. Exit codes follow grep:
 0 matched, 1 nothing, 2 error.
 
 The cache lives at `$TRIGREP_CACHE_DIR/<key>.db`, or by default
@@ -46,6 +58,18 @@ The cache lives at `$TRIGREP_CACHE_DIR/<key>.db`, or by default
 file per canonicalised root. A modified or deleted file leaves stale
 posting-list entries that are filtered at query time (the regex always runs on
 the real file); `--rebuild` reclaims them.
+
+## Building the cache
+
+Files are read, hashed (FNV-1a) and trigram-extracted on a small thread
+pool (`TRIGREP_THREADS`, default `available_parallelism` capped at 8), then
+merged in walk order so file ids — and the cache file itself — are identical
+for any thread count. Writes are committed in windows: every 4,000 files,
+256 MiB of pending postings or 1,000,000 distinct pending trigrams
+(`TRIGREP_CHUNK_FILES`, `TRIGREP_CHUNK_BYTES`, `TRIGREP_CHUNK_TRIGRAMS`),
+each its own transaction. A build killed between windows leaves a
+consistent cache carrying an in-progress marker; the next run, search or
+`index`, finishes the build before answering.
 
 ## How the index narrows a query
 
