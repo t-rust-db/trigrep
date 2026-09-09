@@ -419,3 +419,44 @@ fn mixed_size_posting_lists_split_correctly() {
     );
     assert_cache_healthy(&s.cache_path());
 }
+
+/// #4: reading/hashing runs on a thread pool, but ids are assigned in
+/// path order by the caller, so indexing the *same* tree into two caches
+/// with different thread counts must produce byte-identical files.
+#[test]
+fn cache_is_byte_identical_across_thread_counts() {
+    let s = scratch("threads");
+    for i in 0..300u32 {
+        let body: String = (0..40u32)
+            .map(|j| format!("tok{:x} ", u64::from(i) * 7919 + u64::from(j) * 104_729))
+            .collect();
+        s.write(&format!("d{}/f{i}.txt", i % 7), &body);
+    }
+    let other_cache = s.cache_dir.with_file_name("cache-8threads");
+    std::fs::create_dir_all(&other_cache).unwrap();
+    let run = |cache_dir: &Path, threads: &str| {
+        let out = Command::new(SQLGREP)
+            .env("TRIGREP_CACHE_DIR", cache_dir)
+            .env(trigrep::index::THREADS_ENV, threads)
+            .arg("index")
+            .arg(&s.root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run(&s.cache_dir, "1");
+    run(&other_cache, "8");
+    let a = std::fs::read(s.cache_path()).unwrap();
+    let name = s.cache_path().file_name().unwrap().to_owned();
+    let b = std::fs::read(other_cache.join(name)).unwrap();
+    assert_eq!(a.len(), b.len(), "cache sizes differ");
+    let mismatched = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+    assert_eq!(
+        mismatched, 0,
+        "{mismatched} differing bytes between 1-thread and 8-thread caches"
+    );
+}

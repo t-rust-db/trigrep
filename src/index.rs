@@ -423,19 +423,73 @@ pub fn update(cache: &mut Cache, root: &Path) -> Result<Stats> {
     Ok(stats)
 }
 
-/// Scans one window of entries. Sequential here; #4 parallelises this
-/// function and nothing else, which keeps id assignment (done by the
-/// caller, in path order) independent of thread scheduling.
+/// Reader threads for a window (#4). Reading, hashing and trigram
+/// extraction are per-file and independent; the b-tree writes stay
+/// single-threaded behind the `Pager`. Default `available_parallelism`
+/// capped at 8; `TRIGREP_THREADS=1` is the sequential path.
+pub const THREADS_ENV: &str = "TRIGREP_THREADS";
+
+fn thread_count() -> usize {
+    std::env::var(THREADS_ENV)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+                .min(8)
+        })
+}
+
+/// Scans one window of entries with a small thread pool. Results come
+/// back **in the window's order** regardless of which thread finished
+/// first: each worker claims the next index and writes into that slot,
+/// so id assignment (done by the caller, in path order) and the cache
+/// file itself are byte-identical for any thread count.
 fn scan_window(
     root: &Path,
     window: Vec<crate::walk::Entry>,
     existing: &HashMap<String, FileMeta>,
 ) -> Vec<Scanned> {
-    window
+    let threads = thread_count().min(window.len().max(1));
+    if threads <= 1 {
+        return window
+            .into_iter()
+            .map(|e| {
+                let old = existing.get(e.rel.as_str());
+                scan_one(root, e, old)
+            })
+            .collect();
+    }
+    let n = window.len();
+    let slots: Vec<std::sync::Mutex<Option<crate::walk::Entry>>> = window
         .into_iter()
-        .map(|e| {
-            let old = existing.get(e.rel.as_str());
-            scan_one(root, e, old)
+        .map(|e| std::sync::Mutex::new(Some(e)))
+        .collect();
+    let out: Vec<std::sync::Mutex<Option<Scanned>>> =
+        (0..n).map(|_| std::sync::Mutex::new(None)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|sc| {
+        for _ in 0..threads {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i >= n {
+                    break;
+                }
+                let entry = slots[i].lock().unwrap_or_else(|e| e.into_inner()).take();
+                let Some(entry) = entry else { continue };
+                let old = existing.get(entry.rel.as_str());
+                let r = scan_one(root, entry, old);
+                *out[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+            });
+        }
+    });
+    out.into_iter()
+        .map(|m| {
+            m.into_inner()
+                .unwrap_or_else(|e| e.into_inner())
+                .expect("every slot is filled once its index was claimed")
         })
         .collect()
 }
