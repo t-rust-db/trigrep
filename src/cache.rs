@@ -18,15 +18,15 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use db_storage::row::btree::{
+use db_core::storage::row::btree::{
     bump_schema_cookie, create_empty_table_root, insert_master_row, insert_row, MasterEntry,
     TableCursor,
 };
-use db_storage::row::header::{DatabaseHeader, DEFAULT_PAGE_SIZE};
-use db_storage::row::pager::Pager;
-use db_storage::row::record::{encode_record, Value};
-use db_storage::row::schema::read_schema;
-use db_storage::row::vfs::{UnixVfs, Vfs};
+use db_core::storage::row::header::{DatabaseHeader, DEFAULT_PAGE_SIZE};
+use db_core::storage::row::pager::Pager;
+use db_core::storage::row::record::{encode_record, Value};
+use db_core::storage::row::schema::read_schema;
+use db_core::storage::row::vfs::{UnixVfs, Vfs};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -37,7 +37,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 /// not needed here.
 pub fn open_db<V: Vfs + Clone + 'static>(vfs: &V, path: &Path) -> Result<(DatabaseHeader, Pager)> {
     let file = vfs.open_read(path)?;
-    let mut buf = [0u8; db_storage::row::header::HEADER_LEN];
+    let mut buf = [0u8; db_core::storage::row::header::HEADER_LEN];
     file.read_at(&mut buf, 0)?;
     let header = DatabaseHeader::parse(&buf)?;
     let pager = Pager::open(vfs, path, header.page_size)?;
@@ -208,9 +208,9 @@ fn read_stored_root(
     let Some(row) = cursor.seek_row(1)? else {
         return Ok(None);
     };
-    let record = db_storage::row::record::decode_record(&row.payload, header.text_encoding)?;
+    let record = db_core::storage::row::record::decode_record(&row.payload, header.text_encoding)?;
     match record.get(1) {
-        Some(db_storage::row::record::Value::Text(t)) => Ok(Some(t.to_string())),
+        Some(db_core::storage::row::record::Value::Text(t)) => Ok(Some(t.to_string())),
         _ => Ok(None),
     }
 }
