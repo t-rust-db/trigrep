@@ -53,7 +53,16 @@ struct Args {
     first_is_literal: bool,
 }
 
-fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Args, String> {
+/// Why `parse_args` stopped: a request for help/version (exit 0 on
+/// stdout) is not a usage error (exit 2 on stderr).
+#[derive(Debug, PartialEq, Eq)]
+enum ArgError {
+    Help,
+    Version,
+    Bad(String),
+}
+
+fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Args, ArgError> {
     let mut args = Args {
         rebuild: false,
         case_insensitive: false,
@@ -79,21 +88,39 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "-f" | "--flatten" => args.flatten = true,
             "--color" => args.color = Some(true),
             "--no-color" => args.color = Some(false),
-            "-h" | "--help" => return Err(String::new()),
-            s if s.starts_with('-') && s.len() > 1 => return Err(format!("unknown flag {s}")),
+            "-h" | "--help" => return Err(ArgError::Help),
+            "-V" | "--version" => return Err(ArgError::Version),
+            s if s.starts_with('-') && s.len() > 1 => {
+                return Err(ArgError::Bad(format!("unknown flag {s}")))
+            }
             _ => args.positional.push(a),
         }
     }
     Ok(args)
 }
 
-fn usage() -> ExitCode {
-    eprintln!(
-        "usage: trigrep [-i] [-u] [-f] [--color|--no-color] [--rebuild] <pattern> [path]\n       \
+const USAGE: &str =
+    "usage: trigrep [-i] [-u] [-f] [--color|--no-color] [--rebuild] <pattern> [path]\n       \
          trigrep index [--rebuild] [path]\n       \
-         trigrep cache-path [path]"
-    );
+         trigrep cache-path [path]\n       \
+         trigrep --help | --version";
+
+/// Misuse: usage on stderr, exit 2 (grep's convention).
+fn usage() -> ExitCode {
+    eprintln!("{USAGE}");
     ExitCode::from(2)
+}
+
+/// `--help`/`-h`: the same text, requested rather than provoked --
+/// stdout, exit 0 (what `make smoke` checks).
+fn help() -> ExitCode {
+    println!("{USAGE}");
+    ExitCode::SUCCESS
+}
+
+fn version() -> ExitCode {
+    println!("trigrep {}", env!("CARGO_PKG_VERSION"));
+    ExitCode::SUCCESS
 }
 
 fn fail(e: &impl std::fmt::Display) -> ExitCode {
@@ -109,10 +136,10 @@ fn canonical_root(arg: Option<&String>) -> std::io::Result<PathBuf> {
 fn main() -> ExitCode {
     let args = match parse_args(std::env::args().skip(1)) {
         Ok(a) => a,
-        Err(msg) => {
-            if !msg.is_empty() {
-                eprintln!("trigrep: {msg}");
-            }
+        Err(ArgError::Help) => return help(),
+        Err(ArgError::Version) => return version(),
+        Err(ArgError::Bad(msg)) => {
+            eprintln!("trigrep: {msg}");
             return usage();
         }
     };
@@ -300,32 +327,32 @@ fn is_broken_pipe(e: &(dyn std::error::Error + 'static)) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_args;
+    use super::{parse_args, ArgError};
 
     #[allow(non_snake_case)]
     mod mcdc_vectors {
         //! Tagged MC/DC vectors, trigrep#10.
         use super::parse_args;
 
-        // main_83: `s.starts_with('-') && s.len() > 1`
+        // main_93: `s.starts_with('-') && s.len() > 1`
         #[test]
-        fn mcdc__main_83__v1_no_leading_dash_is_positional() {
+        fn mcdc__main_93__v1_no_leading_dash_is_positional() {
             assert_eq!(
                 parse_args(["plain".to_string()]).unwrap().positional,
                 ["plain"]
             );
         }
         #[test]
-        fn mcdc__main_83__v2_leading_dash_but_len_1_is_positional_not_unknown() {
+        fn mcdc__main_93__v2_leading_dash_but_len_1_is_positional_not_unknown() {
             // condition 1 true, condition 2 false ("-".len() == 1): the bare
             // dash is a filename-like positional, not an unknown flag.
             assert_eq!(parse_args(["-".to_string()]).unwrap().positional, ["-"]);
         }
         #[test]
-        fn mcdc__main_83__v3_leading_dash_and_len_gt_1_is_unknown_flag() {
+        fn mcdc__main_93__v3_leading_dash_and_len_gt_1_is_unknown_flag() {
             assert_eq!(
                 parse_args(["-x".to_string()]).unwrap_err(),
-                "unknown flag -x"
+                super::ArgError::Bad("unknown flag -x".to_string())
             );
         }
 
@@ -333,10 +360,10 @@ mod tests {
         // Exercised end-to-end via tests/cli.rs (a fresh cache always scans;
         // `-u` forces a rescan of an existing one); this module pins the
         // three truth rows that decide independently of each other.
-        // main_209 (retry_locked's guard): `attempt < MAX_ATTEMPTS &&
+        // main_236 (retry_locked's guard): `attempt < MAX_ATTEMPTS &&
         // is_racy_bootstrap_error(e.as_ref())`
         #[test]
-        fn mcdc__main_209__v1_attempts_exhausted_stops_regardless_of_error_kind() {
+        fn mcdc__main_236__v1_attempts_exhausted_stops_regardless_of_error_kind() {
             // condition 1 false short-circuits: an exhausted budget never
             // retries even a racy-shaped error.
             let attempt = 40u32;
@@ -344,13 +371,13 @@ mod tests {
             assert!(!(attempt < 40 && is_racy));
         }
         #[test]
-        fn mcdc__main_209__v2_budget_left_but_not_a_racy_error_does_not_retry() {
+        fn mcdc__main_236__v2_budget_left_but_not_a_racy_error_does_not_retry() {
             let attempt = 0u32;
             let is_racy = super::super::is_racy_bootstrap_error(&std::io::Error::other("boom"));
             assert!(attempt < 40 && !is_racy);
         }
         #[test]
-        fn mcdc__main_209__v3_budget_left_and_a_racy_error_retries() {
+        fn mcdc__main_236__v3_budget_left_and_a_racy_error_retries() {
             let attempt = 0u32;
             let is_racy = super::super::is_racy_bootstrap_error(&std::io::Error::other(
                 "database is locked: x",
@@ -359,26 +386,26 @@ mod tests {
         }
 
         #[test]
-        fn mcdc__main_231__v1_fresh_true_triggers_regardless_of_force_update() {
+        fn mcdc__main_258__v1_fresh_true_triggers_regardless_of_force_update() {
             let fresh = std::env::var("TRIGREP_MCDC_180_UNSET").is_err();
             let force_update = false;
             assert!(fresh || force_update);
         }
         #[test]
-        fn mcdc__main_231__v2_fresh_false_force_update_true_triggers() {
+        fn mcdc__main_258__v2_fresh_false_force_update_true_triggers() {
             let fresh = std::env::var("TRIGREP_MCDC_180_UNSET").is_ok();
             let force_update = std::env::var("TRIGREP_MCDC_180_UNSET").is_err();
             assert!(fresh || force_update);
         }
         #[test]
-        fn mcdc__main_231__v3_both_false_does_not_trigger() {
+        fn mcdc__main_258__v3_both_false_does_not_trigger() {
             let fresh = std::env::var("TRIGREP_MCDC_180_UNSET").is_ok();
             let force_update = std::env::var("TRIGREP_MCDC_180_UNSET").is_ok();
             assert!(!(fresh || force_update));
         }
     }
 
-    fn p(args: &[&str]) -> Result<super::Args, String> {
+    fn p(args: &[&str]) -> Result<super::Args, ArgError> {
         parse_args(args.iter().map(|s| s.to_string()))
     }
 
@@ -412,10 +439,18 @@ mod tests {
     #[test]
     fn bare_dash_is_positional_unknown_flags_and_help_are_errors() {
         assert_eq!(p(&["-"]).unwrap().positional, ["-"]);
-        assert_eq!(p(&["-x"]).unwrap_err(), "unknown flag -x");
-        assert_eq!(p(&["--bogus"]).unwrap_err(), "unknown flag --bogus");
-        assert_eq!(p(&["-h"]).unwrap_err(), "");
-        assert_eq!(p(&["--help"]).unwrap_err(), "");
+        assert_eq!(
+            p(&["-x"]).unwrap_err(),
+            ArgError::Bad("unknown flag -x".to_string())
+        );
+        assert_eq!(
+            p(&["--bogus"]).unwrap_err(),
+            ArgError::Bad("unknown flag --bogus".to_string())
+        );
+        assert_eq!(p(&["-h"]).unwrap_err(), ArgError::Help);
+        assert_eq!(p(&["--help"]).unwrap_err(), ArgError::Help);
+        assert_eq!(p(&["-V"]).unwrap_err(), ArgError::Version);
+        assert_eq!(p(&["--version"]).unwrap_err(), ArgError::Version);
         assert!(p(&[]).unwrap().positional.is_empty());
     }
 }

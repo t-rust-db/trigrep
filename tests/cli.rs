@@ -807,3 +807,27 @@ fn concurrent_first_index_does_not_corrupt_the_cache() {
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("f7.txt:1:needle 7"));
 }
+
+/// `make smoke`'s contract: `--help`/`-h`/`--version` exit 0 with the text
+/// on stdout and nothing on stderr; misuse still exits 2 on stderr.
+#[test]
+fn help_and_version_exit_zero_on_stdout() {
+    for flag in ["--help", "-h", "--version", "-V"] {
+        let out = Command::new(SQLGREP).arg(flag).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{flag}");
+        assert!(!out.stdout.is_empty(), "{flag}: empty stdout");
+        assert!(
+            out.stderr.is_empty(),
+            "{flag}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let help = Command::new(SQLGREP).arg("--help").output().unwrap();
+    assert!(String::from_utf8_lossy(&help.stdout).starts_with("usage: trigrep "));
+    let bad = Command::new(SQLGREP)
+        .arg("--definitely-unknown")
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(bad.stdout.is_empty());
+}

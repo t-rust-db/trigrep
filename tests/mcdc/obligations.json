@@ -495,118 +495,64 @@
     "compiler_void": false
   },
   {
-    "id": "main_68",
+    "id": "main_77",
     "file": "src/main.rs",
-    "line": 68,
-    "decision": "match a.as_str() {\n            _ if literal_rest => {\n                if args.positional.is_empty() {\n                    args.first_is_literal = true;\n                }\n                args.positional.push(a);\n            }\n            \"--\" => literal_rest = true,\n            \"--rebuild\" => args.rebuild = true,\n            \"-i\" | \"--ignore-case\" => args.case_insensitive = true,\n            \"-u\" | \"--update\" => args.update = true,\n            \"-f\" | \"--flatten\" => args.flatten = true,\n            \"--color\" => args.color = Some(true),\n            \"--no-color\" => args.color = Some(false),\n            \"-h\" | \"--help\" => return Err(String::new()),\n            s if s.starts_with('-') && s.len() > 1 => return Err(format!(\"unknown flag {s}\")),\n            _ => args.positional.push(a),\n        }",
+    "line": 77,
+    "decision": "match a.as_str() {\n            _ if literal_rest => {\n                if args.positional.is_empty() {\n                    args.first_is_literal = true;\n                }\n                args.positional.push(a);\n            }\n            \"--\" => literal_rest = true,\n            \"--rebuild\" => args.rebuild = true,\n            \"-i\" | \"--ignore-case\" => args.case_insensitive = true,\n            \"-u\" | \"--update\" => args.update = true,\n            \"-f\" | \"--flatten\" => args.flatten = true,\n            \"--color\" => args.color = Some(true),\n            \"--no-color\" => args.color = Some(false),\n            \"-h\" | \"--help\" => return Err(ArgError::Help),\n            \"-V\" | \"--version\" => return Err(ArgError::Version),\n            s if s.starts_with('-') && s.len() > 1 => {\n                return Err(ArgError::Bad(format!(\"unknown flag {s}\")))\n            }\n            _ => args.positional.push(a),\n        }",
     "conditions": 0,
     "vectors_required": 0,
     "compiler_void": true
   },
   {
-    "id": "main_69",
+    "id": "main_78",
     "file": "src/main.rs",
-    "line": 69,
+    "line": 78,
     "decision": "literal_rest",
     "conditions": 1,
     "vectors_required": 2,
     "compiler_void": false
   },
   {
-    "id": "main_83",
+    "id": "main_93",
     "file": "src/main.rs",
-    "line": 83,
+    "line": 93,
     "decision": "s.starts_with('-') && s.len() > 1",
     "conditions": 2,
     "vectors_required": 3,
     "compiler_void": false
   },
   {
-    "id": "main_70",
+    "id": "main_79",
     "file": "src/main.rs",
-    "line": 70,
+    "line": 79,
     "decision": "args.positional.is_empty()",
     "conditions": 1,
     "vectors_required": 2,
     "compiler_void": false
   },
   {
-    "id": "main_110",
+    "id": "main_137",
     "file": "src/main.rs",
-    "line": 110,
-    "decision": "match parse_args(std::env::args().skip(1)) {\n        Ok(a) => a,\n        Err(msg) => {\n            if !msg.is_empty() {\n                eprintln!(\"trigrep: {msg}\");\n            }\n            return usage();\n        }\n    }",
+    "line": 137,
+    "decision": "match parse_args(std::env::args().skip(1)) {\n        Ok(a) => a,\n        Err(ArgError::Help) => return help(),\n        Err(ArgError::Version) => return version(),\n        Err(ArgError::Bad(msg)) => {\n            eprintln!(\"trigrep: {msg}\");\n            return usage();\n        }\n    }",
     "conditions": 0,
     "vectors_required": 0,
     "compiler_void": true
   },
   {
-    "id": "main_113",
+    "id": "main_146",
     "file": "src/main.rs",
-    "line": 113,
-    "decision": "!msg.is_empty()",
-    "conditions": 1,
-    "vectors_required": 2,
-    "compiler_void": false
-  },
-  {
-    "id": "main_119",
-    "file": "src/main.rs",
-    "line": 119,
+    "line": 146,
     "decision": "match args.positional.first().map(String::as_str) {\n        Some(\"index\") if !args.first_is_literal => run_index(&args),\n        Some(\"cache-path\") if !args.first_is_literal => run_cache_path(&args),\n        Some(_) => run_search(&args),\n        None => usage(),\n    }",
     "conditions": 0,
     "vectors_required": 0,
     "compiler_void": true
   },
   {
-    "id": "main_120",
+    "id": "main_147",
     "file": "src/main.rs",
-    "line": 120,
+    "line": 147,
     "decision": "!args.first_is_literal",
-    "conditions": 1,
-    "vectors_required": 2,
-    "compiler_void": false
-  },
-  {
-    "id": "main_121",
-    "file": "src/main.rs",
-    "line": 121,
-    "decision": "!args.first_is_literal",
-    "conditions": 1,
-    "vectors_required": 2,
-    "compiler_void": false
-  },
-  {
-    "id": "main_128",
-    "file": "src/main.rs",
-    "line": 128,
-    "decision": "args.positional.len() > 2",
-    "conditions": 1,
-    "vectors_required": 2,
-    "compiler_void": false
-  },
-  {
-    "id": "main_131",
-    "file": "src/main.rs",
-    "line": 131,
-    "decision": "match canonical_root(args.positional.get(1)) {\n        Ok(r) => r,\n        Err(e) => return fail(&e),\n    }",
-    "conditions": 0,
-    "vectors_required": 0,
-    "compiler_void": true
-  },
-  {
-    "id": "main_135",
-    "file": "src/main.rs",
-    "line": 135,
-    "decision": "match cache::cache_path(&root) {\n        Ok(p) => {\n            println!(\"{}\", p.display());\n            ExitCode::SUCCESS\n        }\n        Err(e) => fail(&e),\n    }",
-    "conditions": 0,
-    "vectors_required": 0,
-    "compiler_void": true
-  },
-  {
-    "id": "main_145",
-    "file": "src/main.rs",
-    "line": 145,
-    "decision": "args.positional.len() > 2",
     "conditions": 1,
     "vectors_required": 2,
     "compiler_void": false
@@ -615,132 +561,177 @@
     "id": "main_148",
     "file": "src/main.rs",
     "line": 148,
-    "decision": "match canonical_root(args.positional.get(1)) {\n        Ok(r) => r,\n        Err(e) => return fail(&e),\n    }",
-    "conditions": 0,
-    "vectors_required": 0,
-    "compiler_void": true
-  },
-  {
-    "id": "main_157",
-    "file": "src/main.rs",
-    "line": 157,
-    "decision": "match result {\n        Ok((cache, stats)) => {\n            let skipped_note = if stats.skipped_unreadable > 0 {\n                format!(\"; {} unreadable skipped\", stats.skipped_unreadable)\n            } else {\n                String::new()\n            };\n            eprintln!(\n                \"{}: {} added, {} changed, {} removed, {} unchanged ({} posting lists rewritten{})\",\n                cache.path.display(),\n                stats.added,\n                stats.changed,\n                stats.removed,\n                stats.unchanged,\n                stats.trigrams_rewritten,\n                skipped_note\n            );\n            ExitCode::SUCCESS\n        }\n        Err(e) => fail(&e),\n    }",
-    "conditions": 0,
-    "vectors_required": 0,
-    "compiler_void": true
-  },
-  {
-    "id": "main_159",
-    "file": "src/main.rs",
-    "line": 159,
-    "decision": "stats.skipped_unreadable > 0",
+    "decision": "!args.first_is_literal",
     "conditions": 1,
     "vectors_required": 2,
     "compiler_void": false
   },
   {
-    "id": "main_207",
+    "id": "main_155",
     "file": "src/main.rs",
-    "line": 207,
-    "decision": "match f() {\n            Ok(v) => return Ok(v),\n            Err(e) if attempt < MAX_ATTEMPTS && is_racy_bootstrap_error(e.as_ref()) => {\n                // Exponential backoff (capped), integer-only: under N-way\n                // contention a fixed 10ms retry is a thundering herd that\n                // can, in the worst case, out-race its own bounded attempt\n                // count. 5ms doubled per attempt, capped at 200ms.\n                let ms = (5u64 << attempt.min(5)).min(200);\n                attempt = attempt.saturating_add(1);\n                std::thread::sleep(std::time::Duration::from_millis(ms));\n            }\n            Err(e) => return Err(e),\n        }",
-    "conditions": 0,
-    "vectors_required": 0,
-    "compiler_void": true
-  },
-  {
-    "id": "main_209",
-    "file": "src/main.rs",
-    "line": 209,
-    "decision": "attempt < MAX_ATTEMPTS && is_racy_bootstrap_error(e.as_ref())",
-    "conditions": 2,
-    "vectors_required": 3,
-    "compiler_void": false
-  },
-  {
-    "id": "main_231",
-    "file": "src/main.rs",
-    "line": 231,
-    "decision": "fresh || force_update",
-    "conditions": 2,
-    "vectors_required": 3,
-    "compiler_void": false
-  },
-  {
-    "id": "main_242",
-    "file": "src/main.rs",
-    "line": 242,
+    "line": 155,
     "decision": "args.positional.len() > 2",
     "conditions": 1,
     "vectors_required": 2,
     "compiler_void": false
   },
   {
-    "id": "main_245",
+    "id": "main_158",
     "file": "src/main.rs",
-    "line": 245,
+    "line": 158,
+    "decision": "match canonical_root(args.positional.get(1)) {\n        Ok(r) => r,\n        Err(e) => return fail(&e),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "main_162",
+    "file": "src/main.rs",
+    "line": 162,
+    "decision": "match cache::cache_path(&root) {\n        Ok(p) => {\n            println!(\"{}\", p.display());\n            ExitCode::SUCCESS\n        }\n        Err(e) => fail(&e),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "main_172",
+    "file": "src/main.rs",
+    "line": 172,
+    "decision": "args.positional.len() > 2",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "main_175",
+    "file": "src/main.rs",
+    "line": 175,
+    "decision": "match canonical_root(args.positional.get(1)) {\n        Ok(r) => r,\n        Err(e) => return fail(&e),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "main_184",
+    "file": "src/main.rs",
+    "line": 184,
+    "decision": "match result {\n        Ok((cache, stats)) => {\n            let skipped_note = if stats.skipped_unreadable > 0 {\n                format!(\"; {} unreadable skipped\", stats.skipped_unreadable)\n            } else {\n                String::new()\n            };\n            eprintln!(\n                \"{}: {} added, {} changed, {} removed, {} unchanged ({} posting lists rewritten{})\",\n                cache.path.display(),\n                stats.added,\n                stats.changed,\n                stats.removed,\n                stats.unchanged,\n                stats.trigrams_rewritten,\n                skipped_note\n            );\n            ExitCode::SUCCESS\n        }\n        Err(e) => fail(&e),\n    }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "main_186",
+    "file": "src/main.rs",
+    "line": 186,
+    "decision": "stats.skipped_unreadable > 0",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "main_234",
+    "file": "src/main.rs",
+    "line": 234,
+    "decision": "match f() {\n            Ok(v) => return Ok(v),\n            Err(e) if attempt < MAX_ATTEMPTS && is_racy_bootstrap_error(e.as_ref()) => {\n                // Exponential backoff (capped), integer-only: under N-way\n                // contention a fixed 10ms retry is a thundering herd that\n                // can, in the worst case, out-race its own bounded attempt\n                // count. 5ms doubled per attempt, capped at 200ms.\n                let ms = (5u64 << attempt.min(5)).min(200);\n                attempt = attempt.saturating_add(1);\n                std::thread::sleep(std::time::Duration::from_millis(ms));\n            }\n            Err(e) => return Err(e),\n        }",
+    "conditions": 0,
+    "vectors_required": 0,
+    "compiler_void": true
+  },
+  {
+    "id": "main_236",
+    "file": "src/main.rs",
+    "line": 236,
+    "decision": "attempt < MAX_ATTEMPTS && is_racy_bootstrap_error(e.as_ref())",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "main_258",
+    "file": "src/main.rs",
+    "line": 258,
+    "decision": "fresh || force_update",
+    "conditions": 2,
+    "vectors_required": 3,
+    "compiler_void": false
+  },
+  {
+    "id": "main_269",
+    "file": "src/main.rs",
+    "line": 269,
+    "decision": "args.positional.len() > 2",
+    "conditions": 1,
+    "vectors_required": 2,
+    "compiler_void": false
+  },
+  {
+    "id": "main_272",
+    "file": "src/main.rs",
+    "line": 272,
     "decision": "match canonical_root(path) {\n        Ok(r) => r,\n        Err(e) => return fail(&e),\n    }",
     "conditions": 0,
     "vectors_required": 0,
     "compiler_void": true
   },
   {
-    "id": "main_249",
+    "id": "main_276",
     "file": "src/main.rs",
-    "line": 249,
+    "line": 276,
     "decision": "match RegexBuilder::new(pattern)\n        .case_insensitive(args.case_insensitive)\n        .build()\n    {\n        Ok(r) => r,\n        Err(e) => return fail(&e),\n    }",
     "conditions": 0,
     "vectors_required": 0,
     "compiler_void": true
   },
   {
-    "id": "main_256",
+    "id": "main_283",
     "file": "src/main.rs",
-    "line": 256,
+    "line": 283,
     "decision": "match search::required_trigrams(pattern, args.case_insensitive) {\n        Ok(t) => t,\n        Err(e) => return fail(&e),\n    }",
     "conditions": 0,
     "vectors_required": 0,
     "compiler_void": true
   },
   {
-    "id": "main_260",
+    "id": "main_287",
     "file": "src/main.rs",
-    "line": 260,
+    "line": 287,
     "decision": "match open_and_update(&root, args.rebuild, args.update) {\n        Ok(v) => v,\n        Err(e) => return fail(&e),\n    }",
     "conditions": 0,
     "vectors_required": 0,
     "compiler_void": true
   },
   {
-    "id": "main_277",
+    "id": "main_304",
     "file": "src/main.rs",
-    "line": 277,
+    "line": 304,
     "decision": "match search::run(&cache, &query, &output, &mut out) {\n        Ok(n) => n,\n        // A closed pipe (`trigrep ... | head`) is not an error.\n        Err(e) if is_broken_pipe(e.as_ref()) => return ExitCode::SUCCESS,\n        Err(e) => return fail(&e),\n    }",
     "conditions": 0,
     "vectors_required": 0,
     "compiler_void": true
   },
   {
-    "id": "main_280",
+    "id": "main_307",
     "file": "src/main.rs",
-    "line": 280,
+    "line": 307,
     "decision": "is_broken_pipe(e.as_ref())",
     "conditions": 1,
     "vectors_required": 2,
     "compiler_void": false
   },
   {
-    "id": "main_284",
+    "id": "main_311",
     "file": "src/main.rs",
-    "line": 284,
+    "line": 311,
     "decision": "e.kind() == std::io::ErrorKind::BrokenPipe",
     "conditions": 1,
     "vectors_required": 2,
     "compiler_void": false
   },
   {
-    "id": "main_289",
+    "id": "main_316",
     "file": "src/main.rs",
-    "line": 289,
+    "line": 316,
     "decision": "matched > 0",
     "conditions": 1,
     "vectors_required": 2,

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.1] - 2026-09-09
+
+### Added
+
+- `--help`/`-h` now exit 0 with usage on stdout (was exit 2 on stderr, indistinguishable from misuse); `--version`/`-V`. `make smoke` (in `make ci`) builds `tg` and runs both; `tests/cli.rs` pins the contract.
+
 ## [0.4.0] - 2026-09-09
 
 Three design decisions from #15, confirmed before implementation.
