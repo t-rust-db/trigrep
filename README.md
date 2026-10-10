@@ -1,3 +1,8 @@
+> [!IMPORTANT]
+> **Moved to [t-rust-db/tools](https://github.com/t-rust-db/tools/tree/main/trigrep).** This repository is archived.
+> trigrep now lives in the `tools` Cargo workspace, with its full history; open issues were transferred there
+> (t-rust-db/tools#1). Install with `cargo install --git https://github.com/t-rust-db/tools trigrep`.
+
 # trigrep — `tg`
 
 Serverless trigram-indexed grep. The problem [microsoft/tgrep](https://github.com/microsoft/tgrep)
